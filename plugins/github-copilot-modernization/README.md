@@ -100,11 +100,12 @@ All workflows run automatically — just describe what you want and the orchestr
 
 ### Phase 1: Assessment
 
-- Discovers applications in the specified path
-- Auto-detects project language (Java or .NET) and uses the appropriate analysis tools
-- Analyzes dependencies, frameworks, and versions
-- Identifies modernization opportunities and risks
-- Saves results to `.github/modernize/assessment/` (report.json)
+- Uses the native interactive assessment skill with intent selection, group-by-group review, and persistent repo memory
+- Auto-detects Java, .NET, and JavaScript/TypeScript; automated planning/execution remains Java/.NET-only
+- Runs AppCAT and npm-check-updates directly through a bundled Node 18+ runtime; assessment does not require Python or assessment MCP tools
+- Tracks stable findings, suppressions, acknowledgements, regressions, and team preferences in `.github/modernize/.memory/`
+- Generates an interactive self-contained report at `.github/modernize/reports/latest.html`
+- Generates a planning compatibility report at `.github/modernize/assessment/reports/report-<timestamp>/report.json`
 
 ### Phase 2: Planning
 
@@ -123,6 +124,8 @@ All workflows run automatically — just describe what you want and the orchestr
   - **Rearchitecture tasks** → Structural rewrites using a multi-agent coordinator/worker pattern (monolith decomposition, legacy UI modernization, module extraction)
 - Each executor queries MCP knowledge base for migration patterns
 - Monitors progress with automatic retry on failure
+
+The App Modernization MCP server remains configured for planning, migration, upgrade, build, test, and knowledge-base tools. The assessment phase itself no longer calls it.
 
 ## Enterprise Modernization Intent
 
