@@ -44,7 +44,7 @@ test("assessment hook bootstraps the complete runtime for every plugin-root alia
 
     assert.equal(result.status, 0, `${rootVariable}: ${result.stderr}`);
     const runtimeRoot = path.join(projectRoot, ".github", "modernize", ".runtime", "assessment");
-    for (const moduleName of ["assess-cli.mjs", "assess-state.mjs", "assess-report.mjs", "assess-runtime.mjs"]) {
+    for (const moduleName of ["assess-cli.mjs", "assess-state.mjs", "assess-report.mjs", "assess-runtime.mjs", "assessment-catalog.mjs"]) {
       assert.equal(
         fs.readFileSync(path.join(runtimeRoot, moduleName), "utf8"),
         fs.readFileSync(path.join(pluginRoot, "skills", "assessment", "scripts", moduleName), "utf8"),
@@ -53,7 +53,6 @@ test("assessment hook bootstraps the complete runtime for every plugin-root alia
     assert.equal(fs.readFileSync(path.join(runtimeRoot, ".gitignore"), "utf8"), "*\n!.gitignore\n");
     assert.equal(fs.existsSync(path.join(runtimeRoot, "templates", "report.html")), true);
     assert.equal(fs.existsSync(path.join(runtimeRoot, "solution-mapping.json")), true);
-    assert.equal(fs.existsSync(path.join(runtimeRoot, "atomic", "fact-application-type", "analyze.ps1")), true);
-    assert.equal(fs.existsSync(path.join(runtimeRoot, "atomic", "fact-application-type", "analyze.sh")), true);
+    assert.equal(fs.existsSync(path.join(runtimeRoot, "atomic")), false);
   }
 });

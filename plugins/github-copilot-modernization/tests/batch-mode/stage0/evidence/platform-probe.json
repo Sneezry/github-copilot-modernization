@@ -1,0 +1,157 @@
+{
+  "schemaVersion": 1,
+  "status": "passed",
+  "generatedAt": "2026-08-12T08:08:09.613Z",
+  "platform": "win32-x64",
+  "nodeVersion": "v24.2.0",
+  "copilotVersion": "GitHub Copilot CLI 1.0.79.\nRun 'copilot update' to check for updates.",
+  "fixtureSha256": "02799056fcccc148d0a2d7ba95ed9dd818d861d9736f5f7f92e9ee3e8b08c633",
+  "probes": {
+    "repeatInvocation": {
+      "status": "passed",
+      "starts": 2,
+      "ends": 2,
+      "markers": [
+        "ALPHA",
+        "BETA"
+      ],
+      "failedMarkers": [],
+      "maxConcurrency": 1,
+      "durationMs": 57112,
+      "responseTail": "ECHO:ALPHAECHO:BETAREPEAT:ECHO:ALPHA|ECHO:BETA"
+    },
+    "depthAndToolInheritance": {
+      "status": "passed",
+      "positive": {
+        "starts": 1,
+        "ends": 1,
+        "markers": [
+          "DEPTH-4"
+        ],
+        "failedMarkers": [],
+        "maxConcurrency": 1,
+        "durationMs": 60332,
+        "responseTail": "DEPTH4_TOOL_OK_DEPTH5_BLOCKEDDEPTH4_TOOL_OK_DEPTH5_BLOCKEDDEPTH4_TOOL_OK_DEPTH5_BLOCKEDDEPTH4_TOOL_OK_DEPTH5_BLOCKEDDEPTH4_TOOL_OK_DEPTH5_BLOCKED"
+      },
+      "missingParentTool": {
+        "starts": 0,
+        "ends": 0,
+        "markers": [],
+        "failedMarkers": [],
+        "maxConcurrency": 0,
+        "exitCode": 0,
+        "durationMs": 66714,
+        "responseTail": "DEPTH4_TOOL_OK_DEPTH5_BLOCKEDDEPTH4_TOOL_OK_DEPTH5_BLOCKEDDEPTH4_TOOL_OK_DEPTH5_BLOCKEDDEPTH4_TOOL_OK_DEPTH5_BLOCKEDDEPTH4_TOOL_OK_DEPTH5_BLOCKED",
+        "errorTail": ""
+      }
+    },
+    "fanout": [
+      {
+        "status": "passed",
+        "requested": 1,
+        "injectedFailureIndex": 0,
+        "observedScheduling": "serialized",
+        "starts": 1,
+        "ends": 1,
+        "markers": [
+          "FANOUT-1"
+        ],
+        "failedMarkers": [],
+        "maxConcurrency": 1,
+        "durationMs": 43968,
+        "responseTail": "CHILD:FANOUT-1:OKFANOUT_DONE:1",
+        "exitCode": 0
+      },
+      {
+        "status": "passed",
+        "requested": 2,
+        "injectedFailureIndex": 0,
+        "observedScheduling": "overlapped",
+        "starts": 2,
+        "ends": 2,
+        "markers": [
+          "FANOUT-1",
+          "FANOUT-2"
+        ],
+        "failedMarkers": [],
+        "maxConcurrency": 2,
+        "durationMs": 42997,
+        "responseTail": "CHILD:FANOUT-2:OKCHILD:FANOUT-1:OKFANOUT_DONE:2",
+        "exitCode": 0
+      },
+      {
+        "status": "passed",
+        "requested": 6,
+        "injectedFailureIndex": 0,
+        "observedScheduling": "overlapped",
+        "starts": 6,
+        "ends": 6,
+        "markers": [
+          "FANOUT-6",
+          "FANOUT-1",
+          "FANOUT-5",
+          "FANOUT-3",
+          "FANOUT-2",
+          "FANOUT-4"
+        ],
+        "failedMarkers": [],
+        "maxConcurrency": 6,
+        "durationMs": 44949,
+        "responseTail": "CHILD:FANOUTCHILD:FANOUTCHILD:FANOUT--1:OK5:-6OK:OKCHILD:FANOUT-3:OKCHILD:FANOUTCHILD:FANOUT--4:2OK:OKFANOUT_DONE:6",
+        "exitCode": 0
+      },
+      {
+        "status": "passed",
+        "requested": 7,
+        "injectedFailureIndex": 0,
+        "observedScheduling": "overlapped",
+        "starts": 7,
+        "ends": 7,
+        "markers": [
+          "FANOUT-5",
+          "FANOUT-2",
+          "FANOUT-6",
+          "FANOUT-1",
+          "FANOUT-4",
+          "FANOUT-7",
+          "FANOUT-3"
+        ],
+        "failedMarkers": [],
+        "maxConcurrency": 5,
+        "durationMs": 47883,
+        "responseTail": "CHILD:FANOUT-5CH:ILD:FOKANOUT-2:OKCHILD:FANOUT-6:OKCHILD:FANOUTCHILD:FANOUT--1:4:OKOKCHILD:FANOUT-3:OKCHILD:FANOUT-7:OKFANOUT_DONE:7",
+        "exitCode": 0
+      }
+    ],
+    "partialFailure": {
+      "status": "passed",
+      "requested": 7,
+      "injectedFailureIndex": 4,
+      "observedScheduling": "overlapped",
+      "starts": 7,
+      "ends": 7,
+      "markers": [
+        "FANOUT-6",
+        "FANOUT-2",
+        "FANOUT-7",
+        "FANOUT-5",
+        "FANOUT-1",
+        "FANOUT-4",
+        "FANOUT-3"
+      ],
+      "failedMarkers": [
+        "FANOUT-4"
+      ],
+      "maxConcurrency": 4,
+      "durationMs": 50921,
+      "responseTail": "CHILD:FANOUT-6:OKCHILD:FANOUT-2:OKCHILD:FANOUTCHILD:FANOUT-7:OK-5:OKCHILD:FANOUT-1:OKCHILD:FANOUTCHILD:FANOUT--3:OK4:EXPECTED_FAILUREFANOUT_DONE:7",
+      "exitCode": 0
+    },
+    "fanoutSummary": {
+      "maxObservedConcurrency": 6,
+      "serializedCounts": [],
+      "allMultiChildRunsOverlapped": true
+    }
+  },
+  "completedAt": "2026-08-12T08:15:04.606Z"
+}

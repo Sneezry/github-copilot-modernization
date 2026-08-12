@@ -1,0 +1,7 @@
+{
+  "name": "batch-stage0-probe",
+  "description": "Isolated fixture plugin for Batch Mode Stage 0 platform probes",
+  "version": "1.0.0",
+  "agents": "agents/",
+  "mcpServers": ".mcp.json"
+}

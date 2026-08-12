@@ -32,7 +32,7 @@ if (!pluginRoot) {
 
 const source = path.join(pluginRoot, "skills", "assessment");
 const destination = path.join(projectRoot, ".github", "modernize", ".runtime", "assessment");
-const modules = ["assess-cli.mjs", "assess-state.mjs", "assess-report.mjs", "assess-runtime.mjs"];
+const modules = ["assess-cli.mjs", "assess-state.mjs", "assess-report.mjs", "assess-runtime.mjs", "assessment-catalog.mjs"];
 
 for (const moduleName of modules) {
   copyFile(path.join(source, "scripts", moduleName), path.join(destination, moduleName));
@@ -45,16 +45,5 @@ copyFile(
   path.join(source, "resources", "solution-mapping.json"),
   path.join(destination, "solution-mapping.json"),
 );
-
-const atomicRoot = path.join(source, "assessment-skills");
-for (const entry of fs.readdirSync(atomicRoot, { withFileTypes: true })) {
-  if (!entry.isDirectory()) continue;
-  for (const scriptName of ["analyze.ps1", "analyze.sh"]) {
-    const scriptPath = path.join(atomicRoot, entry.name, scriptName);
-    if (fs.existsSync(scriptPath)) {
-      copyFile(scriptPath, path.join(destination, "atomic", entry.name, scriptName));
-    }
-  }
-}
 
 fs.writeFileSync(path.join(destination, ".gitignore"), "*\n!.gitignore\n", "utf8");

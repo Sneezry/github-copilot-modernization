@@ -1,0 +1,179 @@
+{
+  "execution-unit.schema.json": {
+    "schemaVersion": 1,
+    "repoId": "orders-api",
+    "executionUnitId": "orders-api/src-orders",
+    "displayName": "orders-api/src/orders",
+    "workspacePath": "C:\\work\\repos\\orders-api\\src\\orders",
+    "gitRoot": "C:\\work\\repos\\orders-api",
+    "scopeRoots": [
+      "C:\\work\\repos\\orders-api\\src\\orders"
+    ],
+    "languages": [
+      "java"
+    ],
+    "source": "include-path"
+  },
+  "resolved-repos.schema.json": {
+    "schemaVersion": 1,
+    "configPath": "C:\\work\\.github\\modernize\\repos.json",
+    "configSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "producer": "portfolio-team",
+    "repositories": [
+      {
+        "repoId": "orders-api",
+        "name": "orders-api",
+        "input": {
+          "url": "https://github.com/contoso/orders-api.git",
+          "path": null,
+          "branch": "main",
+          "includePaths": [
+            "src/orders"
+          ]
+        },
+        "workspacePath": "C:\\work\\repos\\orders-api",
+        "preflightStatus": "ready",
+        "warnings": [],
+        "errors": [],
+        "executionUnits": [
+          {
+            "schemaVersion": 1,
+            "repoId": "orders-api",
+            "executionUnitId": "orders-api/src-orders",
+            "displayName": "orders-api/src/orders",
+            "workspacePath": "C:\\work\\repos\\orders-api\\src\\orders",
+            "gitRoot": "C:\\work\\repos\\orders-api",
+            "scopeRoots": [
+              "C:\\work\\repos\\orders-api\\src\\orders"
+            ],
+            "languages": [
+              "java"
+            ],
+            "source": "include-path"
+          }
+        ],
+        "unknownFields": {}
+      }
+    ],
+    "apps": [
+      {
+        "identifier": "commerce",
+        "repoIds": [
+          "orders-api"
+        ],
+        "unknownFields": {}
+      }
+    ]
+  },
+  "attempt-request.schema.json": {
+    "schemaVersion": 1,
+    "batchId": "20260812-143000-assess",
+    "invocationId": "4f7e6f2d-8e4f-4e7d-a5d4-3ab29ed8dd3d",
+    "repoId": "orders-api",
+    "executionUnitId": "orders-api/src-orders",
+    "workspacePath": "C:\\work\\repos\\orders-api\\src\\orders",
+    "scopeRoots": [
+      "C:\\work\\repos\\orders-api\\src\\orders"
+    ],
+    "phase": "assessment",
+    "attempt": 1,
+    "mode": "batch-headless",
+    "userRequest": "Assess selected repositories",
+    "phaseApproved": true,
+    "resultPath": "C:\\work\\.github\\modernize\\batches\\20260812-143000-assess\\attempts\\orders-api\\assessment\\1\\result.json",
+    "inputArtifacts": {},
+    "decisions": {}
+  },
+  "needs-input.schema.json": {
+    "schemaVersion": 1,
+    "requestId": "choose-solution-1",
+    "batchId": "20260812-143000-assess",
+    "invocationId": "4f7e6f2d-8e4f-4e7d-a5d4-3ab29ed8dd3d",
+    "repoId": "orders-api",
+    "executionUnitId": "orders-api/src-orders",
+    "sourceAttempt": 1,
+    "status": "pending",
+    "questions": [
+      {
+        "id": "target-service",
+        "kind": "select",
+        "prompt": "Choose the target messaging service",
+        "required": true,
+        "options": [
+          {
+            "value": "service-bus",
+            "label": "Azure Service Bus"
+          }
+        ]
+      }
+    ],
+    "answers": []
+  },
+  "attempt-result.schema.json": {
+    "schemaVersion": 1,
+    "batchId": "20260812-143000-assess",
+    "invocationId": "4f7e6f2d-8e4f-4e7d-a5d4-3ab29ed8dd3d",
+    "repoId": "orders-api",
+    "executionUnitId": "orders-api/src-orders",
+    "phase": "assessment",
+    "attempt": 1,
+    "status": "completed_with_issues",
+    "artifacts": {
+      "report": "C:\\work\\repos\\orders-api\\.github\\modernize\\assessment\\reports\\report-123\\report.json",
+      "html": "C:\\work\\repos\\orders-api\\.github\\modernize\\reports\\123-full-audit.html"
+    },
+    "evidence": {
+      "artifactValidation": "passed",
+      "high": 2,
+      "medium": 5
+    },
+    "needsInput": null,
+    "error": null,
+    "completedAt": "2026-08-12T14:35:00.000Z"
+  },
+  "batch-state.schema.json": {
+    "schemaVersion": 1,
+    "batchId": "20260812-143000-assess",
+    "status": "running",
+    "revision": 3,
+    "createdAt": "2026-08-12T14:30:00.000Z",
+    "updatedAt": "2026-08-12T14:35:00.000Z",
+    "activeLeaseDigest": "sha256:example",
+    "executionUnits": [
+      {
+        "repoId": "orders-api",
+        "executionUnitId": "orders-api/src-orders",
+        "phase": "assessment",
+        "attempt": 1,
+        "invocationId": "4f7e6f2d-8e4f-4e7d-a5d4-3ab29ed8dd3d",
+        "status": "running",
+        "resultPath": "C:\\work\\.github\\modernize\\batches\\20260812-143000-assess\\attempts\\orders-api\\assessment\\1\\result.json",
+        "startedAt": "2026-08-12T14:34:00.000Z",
+        "finishedAt": null
+      }
+    ],
+    "progress": {
+      "wave": 1,
+      "eligible": 1,
+      "terminal": 0,
+      "successful": 0,
+      "issues": 0,
+      "failed": 0
+    }
+  },
+  "event.schema.json": {
+    "schemaVersion": 1,
+    "eventId": "095b5fd8-60c6-4c91-bf1c-ce56069fe305",
+    "sequence": 4,
+    "batchId": "20260812-143000-assess",
+    "type": "attempt_started",
+    "at": "2026-08-12T14:34:00.000Z",
+    "repoId": "orders-api",
+    "executionUnitId": "orders-api/src-orders",
+    "invocationId": "4f7e6f2d-8e4f-4e7d-a5d4-3ab29ed8dd3d",
+    "payload": {
+      "phase": "assessment",
+      "attempt": 1
+    }
+  }
+}

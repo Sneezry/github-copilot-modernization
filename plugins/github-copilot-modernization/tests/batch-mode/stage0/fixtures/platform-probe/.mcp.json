@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "stage0-probe-mcp": {
+      "type": "local",
+      "command": "node",
+      "args": [
+        "mcp-server.mjs"
+      ],
+      "tools": [
+        "*"
+      ]
+    }
+  }
+}

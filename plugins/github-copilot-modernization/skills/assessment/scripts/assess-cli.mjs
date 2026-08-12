@@ -510,7 +510,7 @@ function bootstrapRuntime(workspacePath) {
   const sourceDirectory = path.dirname(fileURLToPath(import.meta.url));
   const destination = path.resolve(workspacePath, ".github", "modernize", ".runtime", "assessment");
   fs.mkdirSync(path.join(destination, "templates"), { recursive: true });
-  for (const name of ["assess-cli.mjs", "assess-state.mjs", "assess-report.mjs", "assess-runtime.mjs"]) {
+  for (const name of ["assess-cli.mjs", "assess-state.mjs", "assess-report.mjs", "assess-runtime.mjs", "assessment-catalog.mjs"]) {
     fs.copyFileSync(path.join(sourceDirectory, name), path.join(destination, name));
   }
   fs.copyFileSync(
@@ -551,6 +551,39 @@ export async function main(argv = process.argv.slice(2)) {
       for (const warning of result.warnings) console.error(warning);
       console.log(result.output);
       return result.warnings.length ? 1 : 0;
+    }
+
+    if (command === "plan") {
+      const { buildAssessmentPlan } = await import("./assessment-catalog.mjs");
+      printResult(buildAssessmentPlan({
+        domains: splitOption(options.domains) ?? [],
+        analysisCoverage: options.coverage ?? "issue-only",
+        assessmentRoot: options["assessment-root"],
+      }));
+      return 0;
+    }
+
+    if (command === "prepare-run") {
+      const { prepareAssessmentRun } = await import("./assessment-catalog.mjs");
+      printResult(prepareAssessmentRun({
+        workspacePath: requireOption(options, "workspace-path"),
+        runId: requireOption(options, "run-id"),
+        language: requireOption(options, "language"),
+        domains: splitOption(options.domains) ?? [],
+        analysisCoverage: options.coverage ?? "issue-only",
+      }));
+      return 0;
+    }
+
+    if (command === "archive-facts") {
+      const { archiveFactFiles } = await import("./assessment-catalog.mjs");
+      const result = archiveFactFiles({
+        workspacePath: requireOption(options, "workspace-path"),
+        reportPath: requireOption(options, "report"),
+        analysisCoverage: options.coverage ?? "issue-only",
+      });
+      printResult(result);
+      return result.missing.length === 0 ? 0 : 1;
     }
 
     if (command === "ensure-appcat") {

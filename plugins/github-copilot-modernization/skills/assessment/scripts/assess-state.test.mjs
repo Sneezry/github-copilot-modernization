@@ -267,7 +267,7 @@ test("generateCompatibilityReport maps AppCAT, CVE, and CWE findings to kbIds", 
       { id: "cve::two", skill: "cve-known-vulnerabilities", severity: "critical", title: "CVE-2026-1" },
       { id: "cwe::three", skill: "cwe-injection-attacks", severity: "high", title: "CWE-89" },
       { id: "resolved::four", skill: "appcat::aws-s3", source: "appcat", severity: "medium", title: "Resolved S3", evidence: "AppCAT rules: azure-aws-config-s3-03000", state: "resolved" },
-      { id: "fact::five", skill: "fact-application-name", severity: "info", title: "Application name: demo", state: "new" },
+      { id: "fact::five", skill: "informational-metadata", severity: "info", title: "Application name: demo", state: "new" },
     ],
   });
   writeYamlAtomic(path.join(state.runDir, "intent.yaml"), { version: 1, user_concern: "security" });
@@ -296,7 +296,7 @@ test("generateCompatibilityReport maps AppCAT, CVE, and CWE findings to kbIds", 
   assert.equal(report.metadata.language, "java");
   assert.equal(report.findings.length, 4);
   assert.equal(report.metadata.totalTrackedFindings, 6);
-  assert.equal(report.categories.some((category) => category.sourceSkill === "fact-application-name"), false);
+  assert.equal(report.categories.some((category) => category.sourceSkill === "informational-metadata"), false);
   assert.equal(report.categories.filter((category) => category.sourceSkill === "appcat::aws-s3").length, 2);
   assert.equal(report.security.length, 2);
   const kbIds = report.categories.flatMap((category) => category.solutions.map((solution) => solution.kbId));

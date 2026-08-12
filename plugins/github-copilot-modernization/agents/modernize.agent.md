@@ -81,7 +81,7 @@ Before EVERY action, verify:
 
 **If you find yourself doing ANY of the following, you are WRONG:**
 
-- Calling appmod-run-assessment, appmod-create-plan for actual work
+- Calling phase implementation tools instead of the responsible coordinator
 - Calling appmod-* / AppModJavaUpgrade-* / AppModAzureJavaCLI-* tools
 - Running build/test commands yourself
 - Editing code files yourself
@@ -517,7 +517,7 @@ Before starting ANY phase, you MUST verify:
 ```
 [ ] Did I receive a broad intent request? (e.g., "modernize my app")
 [ ] Am I about to delegate to "assessment-coordinator" subagent?
-[ ] Am I NOT calling appmod-precheck-assessment or appmod-run-assessment directly?
+[ ] Am I delegating all assessment execution to the local assessment skill through that coordinator?
 [ ] Am I NOT passing "security" in config.domains? (modernize flow must only use java-upgrade and cloud-readiness)
 [ ] If NO to any → STOP and fix
 ```

@@ -100,11 +100,13 @@ All workflows run automatically — just describe what you want and the orchestr
 
 ### Phase 1: Assessment
 
-- Uses the native interactive assessment skill with intent selection, group-by-group review, and persistent repo memory
+- Uses a plugin-owned local assessment catalog; assessment does not call MCP tools
 - Auto-detects Java, .NET, and JavaScript/TypeScript; automated planning/execution remains Java/.NET-only
-- Runs AppCAT and npm-check-updates directly through a bundled Node 18+ runtime; assessment does not require Python or assessment MCP tools
-- Tracks stable findings, suppressions, acknowledgements, regressions, and team preferences in `.github/modernize/.memory/`
-- Generates an interactive self-contained report at `.github/modernize/reports/latest.html`
+- Runs AppCAT, npm-check-updates, and GitHub advisory checks through the bundled Node 18+ runtime and local skills
+- Full coverage runs exactly six document facts: architecture, dependencies, API contracts, data, configuration, and business workflows
+- Security runs seven local tasks: one CVE scan plus six CWE category reviews
+- Runs each batch separately, so assessment requires at most seven concurrent subagents, not a fixed pool of twelve
+- Generates a self-contained versioned HTML report under `.github/modernize/reports/`
 - Generates a planning compatibility report at `.github/modernize/assessment/reports/report-<timestamp>/report.json`
 
 ### Phase 2: Planning
@@ -125,7 +127,7 @@ All workflows run automatically — just describe what you want and the orchestr
 - Each executor queries MCP knowledge base for migration patterns
 - Monitors progress with automatic retry on failure
 
-The App Modernization MCP server remains configured for planning, migration, upgrade, build, test, and knowledge-base tools. The assessment phase itself no longer calls it.
+The App Modernization MCP server remains configured for planning, migration, upgrade, build, test, and knowledge-base tools. Assessment is fully local and does not call it.
 
 ## Enterprise Modernization Intent
 

@@ -65,11 +65,12 @@ Update to the latest version:
 ### Phase 1: Assessment
 
 The assessment phase:
-- Uses the native interactive assessment workflow and persists repository-level assessment memory
+- Uses a plugin-owned local catalog and does not call MCP tools
 - Supports Java, .NET, and JavaScript/TypeScript discovery and analysis; downstream automated planning/execution supports Java and .NET
-- Uses a bundled Node 18+ runtime to run AppCAT/npm-check-updates and generate reports; Python and assessment MCP tools are not required
-- Saves stable findings and user decisions under `.github/modernize/.memory/`
-- Writes the interactive report to `.github/modernize/reports/latest.html`
+- Uses the bundled Node 18+ runtime for AppCAT, npm-check-updates, normalized findings, and report generation
+- Full coverage runs six fact documents; security runs one CVE task plus six CWE category tasks
+- Executes those as separate batches, with a maximum of seven concurrent assessment subagents
+- Writes a versioned HTML report under `.github/modernize/reports/`
 - Writes a compatibility report for planning to `.github/modernize/assessment/reports/report-<timestamp>/report.json`
 
 ### Phase 2: Planning
