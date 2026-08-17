@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "status": "blocked",
+  "scenario": "stage1b-real-repository-product-host-e2e",
+  "generatedAt": "2026-08-17T08:00:21.868Z",
+  "platform": "win32-x64",
+  "nodeVersion": "v22.21.1",
+  "copilotVersion": "GitHub Copilot CLI 1.0.81-0",
+  "model": "auto",
+  "productPackage": {
+    "name": "github-copilot-modernization",
+    "version": "1.22.0",
+    "sha256": "e17e68b04e209e52242a7fa480ce179fd5fc662f2acfb01d8e76854e2f6e2c4a"
+  },
+  "appcat": {
+    "version": "7.7.0.10",
+    "minimumVersion": "7.7.0.8",
+    "compatible": true
+  },
+  "configSha256": "562573eb7d423773de0a771cb5de77ad3fe9afe30f7bf58f8e3345999e9c3e91",
+  "repositories": [
+    {
+      "name": "spring-petclinic",
+      "revision": "88e37c15cf6fc8490b01bc3e8e2c800cec1ac272"
+    },
+    {
+      "name": "airsonic-advanced",
+      "revision": "68d11bfbfe051b0acaca2770c3c1f47f8d59201c"
+    }
+  ],
+  "host": {
+    "sessionId": "641a5219-4f67-4cab-8637-d586db71216a",
+    "durationMs": 13263,
+    "stopReason": "end_turn",
+    "hostErrors": [
+      "exceeded your (?:monthly )?quota"
+    ],
+    "permissionRequestCount": 0,
+    "elicitationRequestCount": 0,
+    "toolCallCount": 0
+  },
+  "assessment": {
+    "status": "not_run",
+    "reportsGenerated": false,
+    "reportCompleteness": "not_evaluated"
+  },
+  "blocker": {
+    "code": "copilot_quota_exhausted"
+  },
+  "completedAt": "2026-08-17T08:00:35.223Z"
+}

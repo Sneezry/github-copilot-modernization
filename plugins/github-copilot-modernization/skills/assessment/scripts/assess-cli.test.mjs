@@ -172,6 +172,63 @@ test("load-memory command runs through the Node executable", () => {
   assert.match(result.stdout, /findings=0 patches=0\/0 suppressions=0/);
 });
 
+test("bootstrap creates an independent Assessment runtime in every target workspace", () => {
+  const parent = createTemporaryDirectory();
+  const workspaces = ["java", "dotnet", "typescript"].map((name) => path.join(parent, name));
+  const destinations = workspaces.map((workspacePath) => {
+    fs.mkdirSync(workspacePath);
+    const result = spawnSync(
+      process.execPath,
+      [scriptPath, "bootstrap", "--workspace-path", workspacePath],
+      { encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout).destination;
+  });
+
+  assert.equal(new Set(destinations).size, workspaces.length);
+  for (const [index, destination] of destinations.entries()) {
+    assert.equal(
+      destination,
+      path.join(workspaces[index], ".github", "modernize", ".runtime", "assessment"),
+    );
+    assert.equal(fs.existsSync(path.join(destination, "assess-cli.mjs")), true);
+    assert.equal(fs.readFileSync(path.join(destination, ".gitignore"), "utf8"), "*\n!.gitignore\n");
+  }
+});
+
+test("prepare-run CLI passes batch scratch and concurrency options", () => {
+  const workspacePath = createTemporaryDirectory();
+  const attemptScratchRoot = path.join(workspacePath, "batch", "attempt-1");
+  const result = spawnSync(
+    process.execPath,
+    [
+      scriptPath,
+      "prepare-run",
+      "--workspace-path", workspacePath,
+      "--run-id", "20260817-130000",
+      "--language", "java",
+      "--domains", "security",
+      "--coverage", "full",
+      "--attempt-scratch-root", attemptScratchRoot,
+      "--max-concurrency", "1",
+    ],
+    { encoding: "utf8" },
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  const plan = JSON.parse(result.stdout);
+  assert.equal(plan.attemptScratchRoot, path.resolve(attemptScratchRoot));
+  assert.equal(fs.statSync(attemptScratchRoot).isDirectory(), true);
+  assert.deepEqual(plan.batches.map((batch) => batch.maxConcurrency), [1, 1]);
+  assert.equal(
+    plan.batches.flatMap((batch) => batch.tasks).every(
+      (taskEntry) => !path.relative(attemptScratchRoot, taskEntry.outputPath).startsWith(".."),
+    ),
+    true,
+  );
+});
+
 test("loadMemory warns on unsupported persisted schema versions", () => {
   const memoryDir = createTemporaryDirectory();
   writeFile(memoryDir, "findings.yaml", "version: 2\nfindings: []\n");

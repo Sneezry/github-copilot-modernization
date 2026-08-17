@@ -1,6 +1,6 @@
 # Batch Mode 实施计划与风险评估
 
-> 状态：Draft，供实施评审使用
+> 状态：Stage 1B 功能实现完成，但私有预览交付 No-Go；Stage 2 尚未开始
 >
 > 创建日期：2026-08-12
 >
@@ -10,7 +10,9 @@
 >
 > 问题台账：`BATCH_MODE_OPEN_ISSUES.md`
 >
-> 问题台账 SHA-256：`BFA3DA313065EB88006B35BF878FEA67489A683CAFCC5B59F5542D4B7EF13147`
+> 问题台账 SHA-256：`E8809135B6F4BEA73C0CB455A1CB3172551EAB9384F44B5CEAF7A961EFC2323D`
+>
+> 交付评审与整改计划：`BATCH_ASSESSMENT_DELIVERY_READINESS.md`
 
 ## 1. 目的与结论
 
@@ -21,6 +23,7 @@
 - 完整 Batch Mode 是新的执行控制平面，不是小型 UI 增强。
 - 若采用独立 batch 路径、显式门禁和 batch-only 工件，现有 single-repository 功能的回归风险可控制在中低水平。
 - Batch Assessment 可以作为首个用户可见切片，综合风险为中等。
+- 当前 Stage 1B 只达到功能实现完成；成功证据、崩溃一致性、产品链路 E2E 和 `include_paths` 读取边界通过前，不得发布私有预览。
 - Batch Planning 涉及交互协议和计划版本化，风险较高。
 - Batch Execution 涉及代码修改、分支、提交、中断和重试，是最高风险阶段；不得与 Batch Assessment 同批交付。
 - 在对应 open issue 关闭前，不得以“实现时再处理”为理由绕过阶段 Gate。
@@ -114,6 +117,9 @@
 | BM-005 Pause signaling | Stage 1B GA 前 | 未关闭时只支持 invocation 边界暂停，不宣称运行中正常暂停。 |
 | BM-006 Workspace/Git safety | Stage 1A 路径预检前 | 未关闭时不 clone、不接受外部绝对路径。 |
 | BM-007 Retry/result semantics | Stage 1B retry 前 | 未关闭时不提供终态仓库 retry。 |
+| BM-008 Assessment result evidence | Stage 1B private preview 前 | 未关闭时不接受任何成功终态。 |
+| BM-009 Attempt crash consistency | Stage 1B private preview 前 | 未关闭时不发布跨session可见的成功摘要。 |
+| BM-010 Production agent E2E | Stage 1B private preview 前 | 未关闭时只视为组件实现，不视为产品可交付。 |
 
 ## 6. 分阶段实施计划
 
@@ -201,7 +207,7 @@ skills/batch-modernization/
 - v1/v2配置、execution-unit、路径/Git预检、原子clone、状态/lease/takeover、结果证据校验均由本地Node实现，不调用agent或MCP。
 - Takeover lease强制只读；旧owner和takeover owner都不能在接管后写入或调度。
 - Stage 1A skill tests：42通过，0失败。
-- BM-006已关闭；BM-002保留为`Decided`，等待Stage 1B验证同Git-root调度串行化。
+- BM-006已关闭；BM-002已取得execution-unit隔离、canonical scope和同Git-root串行的实现证据，但因缺少真实phase-agent sibling读取边界证据而在交付评审中重开。
 
 **退出 Gate**
 
@@ -215,7 +221,7 @@ skills/batch-modernization/
 
 控制层仍未接入入口。删除 `batch-modernization` skill 不影响 single mode。
 
-### Stage 1B：私有预览 Batch Assessment
+### Stage 1B：私有预览 Batch Assessment（功能实现完成，交付 No-Go）
 
 **目标**
 
@@ -237,23 +243,40 @@ skills/batch-modernization/
 
 **任务**
 
-- [ ] IP-201 `batch-assessment` 每次只接收一个 execution unit 和一个 attempt request。
-- [ ] IP-202 每个 attempt 使用独立 scratch；验证成功后只链接现有版本化报告。
-- [ ] IP-203 Scheduler 把 catalog concurrency 作为上限，支持 wave 和 `maxConcurrency=1`。
-- [ ] IP-204 每个目标仓库显式 bootstrap Assessment runtime，不修改 SessionStart hook。
-- [ ] IP-205 实现 missing/malformed task result → partial/ProtocolError 的确定性映射。
-- [ ] IP-206 首次预览只支持显式 batch意图；不因检测到配置而改变模糊 single请求。
-- [ ] IP-207 先支持无恢复的顺序运行；fencing通过后再开放 takeover/resume。
-- [ ] IP-208 验证 Java、.NET、JavaScript/TypeScript 混合仓库及 partial failure。
+- [x] IP-201 `batch-assessment` 每次只接收一个 execution unit 和一个 attempt request。
+- [x] IP-202 每个 attempt 使用独立 scratch；验证成功后只链接现有版本化报告。
+- [x] IP-203 Scheduler 把 catalog concurrency 作为上限，支持 wave 和 `maxConcurrency=1`。
+- [x] IP-204 每个目标仓库显式 bootstrap Assessment runtime，不修改 SessionStart hook。
+- [x] IP-205 实现 missing/malformed task result → partial/ProtocolError 的确定性映射。
+- [x] IP-206 首次预览只支持显式 batch意图；不因检测到配置而改变模糊 single请求。
+- [x] IP-207 先支持无恢复的顺序运行；fencing通过后再开放 takeover/resume。
+- [x] IP-208 验证 Java、.NET、JavaScript/TypeScript 混合仓库及 partial failure。
 
-**退出 Gate**
+**实施结果（2026-08-17）：Functionally Completed / Delivery No-Go**
 
-- BM-002、BM-003、BM-006 已关闭。
-- 若开放 takeover/resume，BM-001 已关闭。
+- 新增内部`batch-review`、`batch-coordinator`和`batch-assessment`；顶层`modernize`拥有结构化`ask_user`，nested agents不请求该工具，phase agent每次只消费一个不可变`request.json`。
+- `batch-attempt.mjs`实现初始化、attempt启动、无owner-token结果发布、证据提交、ProtocolError映射、聚合摘要和lease释放。
+- Assessment新增可选attempt scratch与1至7并发上限；省略参数时single路径、工件位置和6/7默认上限保持不变。
+- `modernize`只对明确`repos.json`、multiple/all/selected repositories或batch assessment意图委托一次；配置存在本身不会触发batch。
+- Java、.NET、TypeScript混合批次验证成功；partial结果继续聚合，TypeScript可完成Assessment并记录`planningSupported: false`。
+- 同Git root的多个include-path execution unit保持请求、scratch、result和报告隔离，且任意时刻只允许一个active attempt。
+- BM-003关闭；BM-002因缺少真实phase-agent sibling读取边界证据而重开。BM-001仍为Deferred，因此不开放takeover后调度、resume或retry。
+- 插件`*.test.mjs`回归：143通过、0失败、1个Windows条件性跳过；Stage 1B harness为33通过、0失败；改动文件诊断为0。
+- DQ-003 product probe、真实仓库 runner、artifact/report完整性 validator和Windows/Ubuntu workflow已实现。Windows Retry 10 已通过真实双仓正向链路：2/2 completed、严格串行、Spring 11 findings、Airsonic 34 findings、报告完整且tracked files unchanged。当前package的5个正向/路由探针通过，但natural child failure注入和两个ACP permission-event场景为`not_supported`，POSIX也未执行，因此DQ-003/BM-010仍未关闭。
+
+**功能实现 Gate（已通过）**
+
 - 两个仓库产生独立 invocation、scratch 和 report链接。
 - `maxConcurrency=1` 与平台允许的较高上限生成等价结果集合。
 - Assessment 调用链不存在 Assessment MCP。
 - 全部现有 single Assessment测试和 golden tests通过。
+
+**交付 Gate（未通过）**
+
+- `BATCH_ASSESSMENT_DELIVERY_READINESS.md`中的P0 Workstream A-D尚未完成。
+- BM-002、BM-008、BM-009、BM-010尚未全部关闭。
+- Windows已有通过的真实`modernize -> batch-review -> batch-coordinator -> batch-assessment`正向E2E；但负向failure matrix及POSIX证据未完成，尚不满足跨平台产品链路Gate。
+- 若开放takeover/resume，仍必须先关闭BM-001。
 
 **发布与回滚**
 
@@ -480,11 +503,13 @@ skills/batch-modernization/
 
 ### Stage 1B Batch Assessment
 
-- [ ] Stage 0与Stage 1A全部退出Gate通过。
-- [ ] BM-002、BM-003、BM-006关闭。
-- [ ] Single mode回归全绿。
-- [ ] Batch路由可独立关闭。
-- [ ] 不依赖takeover时，UI不宣称支持强制中断恢复。
+- [ ] `BATCH_ASSESSMENT_DELIVERY_READINESS.md`中的P0 Workstream A-D全部通过。
+- [ ] BM-002、BM-008、BM-009、BM-010关闭。
+- [ ] 真实产品agent链路在Windows和POSIX各有一次可复核E2E证据。
+- [ ] 每个成功摘要均可追溯到attempt-bound validation record。
+- [x] Single mode回归全绿。
+- [ ] Batch路由具有独立preview feature flag/route switch，且关闭行为通过安装包E2E。
+- [x] 不依赖takeover时，UI不宣称支持强制中断恢复。
 
 ### Stage 2 Batch Planning
 
@@ -545,3 +570,6 @@ skills/batch-modernization/
 | 2026-08-12 | 首个用户可见切片为显式门禁下的顺序Batch Assessment | Proposed |
 | 2026-08-12 | Batch Planning与Batch Execution分开交付 | Proposed |
 | 2026-08-12 | Batch Execution采用capability allowlist，不一次性复用全部worker | Proposed |
+| 2026-08-17 | Stage 1B显式Batch Assessment完成控制层实现并接入`modernize` | Accepted |
+| 2026-08-17 | Stage 1B交付评审为No-Go；按独立整改计划完成P0 Gate后重新评审 | Accepted |
+| 2026-08-17 | Takeover/resume/retry、Batch Planning与Batch Execution继续保持关闭 | Accepted |

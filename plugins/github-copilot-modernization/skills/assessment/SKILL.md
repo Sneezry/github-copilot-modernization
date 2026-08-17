@@ -12,6 +12,7 @@ Assess one repository using only plugin-shipped skills, scripts, AppCAT, npm-che
 
 - `workspace-path`: Absolute project root. Defaults to the current directory.
 - `invocation-mode`: `standalone`, `coordinator`, or `batch-headless`.
+- `attempt-request-path` (batch-headless only): Absolute v1 request artifact created by the batch control plane.
 - `config` (optional): Explicit user overrides only. Never infer or fill unspecified fields.
   - `domains`: `java-upgrade`, `cloud-readiness`, `security`
   - `analysisCoverage`: `issue-only` or `full`
@@ -24,7 +25,7 @@ Defaults:
 - .NET: domain `cloud-readiness`; coverage `issue-only`.
 - JavaScript/TypeScript: local dependency assessment; automated Planning remains unsupported.
 
-In `batch-headless` mode, never call `ask_user`. Missing required information becomes a structured `NeedsInput` result for the caller.
+In `batch-headless` mode, never call `ask_user`. Read workspace, scope, approval, config, attempt scratch, and result path only from the request artifact. Stage 1B accepts only fully approved Assessment input; missing required information fails the attempt instead of selecting a default or starting a persisted `NeedsInput` exchange.
 
 ## Hard Boundaries
 
@@ -70,6 +71,15 @@ node .github/modernize/.runtime/assessment/assess-cli.mjs prepare-run \
 ```
 
 Treat its JSON output as the only assessment task plan. It prepares run state, removes stale canonical outputs, and returns paths for AppCAT, findings, reports, and independent subagent batches.
+
+For `batch-headless`, also pass attempt-scoped controls from the request:
+
+```bash
+  --attempt-scratch-root <attempt-directory>/scratch \
+  --max-concurrency <request.decisions.maxConcurrency>
+```
+
+These options isolate AI task outputs and cap each wave. Omitting them preserves the single-repository paths and 6/7 task ceilings.
 
 ## 3. Run Deterministic Local Engines
 
@@ -117,7 +127,7 @@ Record the generated JSON result through `record-result`. Return `planningSuppor
 
 ## 4. Execute Plugin-Owned AI Batches
 
-Use only the batches returned by `prepare-run`. Execute batches one at a time. Within one batch, issue every subagent call in a single assistant turn, then wait for all results.
+Use only the batches returned by `prepare-run`. Execute batches one at a time. In standalone/coordinator mode, issue the batch's subagent calls in one assistant turn. In `batch-headless`, partition tasks in catalog order into waves no larger than the returned `maxConcurrency`; issue one wave in one assistant turn, wait for all results, then issue the next wave. Result requirements do not change when capacity is 1.
 
 ### Full-Coverage Facts: Exactly 6
 
@@ -147,7 +157,7 @@ The local security batch contains:
 
 All seven are independent top-level plugin skills under `skills/<skill-id>/SKILL.md`; none is nested under `assessment`.
 
-Dispatch all seven concurrently. Save each complete subagent result to its plan-provided JSON output path, then normalize every result:
+Dispatch all seven subject to the plan-provided concurrency ceiling. Save each complete subagent result to its plan-provided JSON output path, then normalize every result:
 
 ```bash
 node .github/modernize/.runtime/assessment/assess-cli.mjs record-result \
@@ -168,7 +178,7 @@ There is no fixed 12-subagent scheduler:
 - security batch: 7 concurrent subagents;
 - AppCAT-only assessment: no AI subagents.
 
-When both security and full coverage are selected, execute the two batches separately. Do not merge them into a 13-subagent turn. The maximum concurrency required by this catalog is 7.
+When both security and full coverage are selected, execute the two batches separately. Do not merge them into a 13-subagent turn. The maximum concurrency permitted by this catalog is 7. Batch correctness must also hold at a ceiling of 1.
 
 ## 5. Generate And Verify Reports
 
@@ -200,8 +210,11 @@ For full coverage, archive and verify all six fact documents beside the compatib
 node .github/modernize/.runtime/assessment/assess-cli.mjs archive-facts \
   --workspace-path <workspace-path> \
   --report <compatibility-report-path> \
-  --coverage full
+  --coverage full \
+  --facts-root <attempt-directory>/scratch/engines/facts
 ```
+
+Omit `--facts-root` outside batch mode to preserve the canonical single-repository source path.
 
 Completion requires:
 

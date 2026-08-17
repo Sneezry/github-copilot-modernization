@@ -73,6 +73,8 @@ test("assessment entry points contain no assessment MCP dependency", () => {
   const files = [
     path.join(assessmentRoot, "SKILL.md"),
     path.join(pluginRoot, "agents", "assessment-coordinator.agent.md"),
+    path.join(pluginRoot, "agents", "batch-assessment.agent.md"),
+    path.join(pluginRoot, "agents", "batch-coordinator.agent.md"),
     path.join(pluginRoot, "agents", "modernize-java-assessment.agent.md"),
     path.join(pluginRoot, "agents", "modernize.agent.md"),
   ];
@@ -128,6 +130,73 @@ test("prepare creates one local run and clears only canonical task outputs", (t)
   assert.equal(fs.existsSync(prepared.findingsPath), true);
 });
 
+test("batch preparation isolates task outputs and bounds concurrency", (t) => {
+  const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), "assessment-batch-"));
+  t.after(() => fs.rmSync(workspacePath, { recursive: true, force: true }));
+
+  const canonicalFact = path.join(
+    workspacePath,
+    ".github",
+    "modernize",
+    "assessment",
+    "engines",
+    "facts",
+    "architecture-diagram.md",
+  );
+  fs.mkdirSync(path.dirname(canonicalFact), { recursive: true });
+  fs.writeFileSync(canonicalFact, "single-mode-output", "utf8");
+  const attemptScratchRoot = path.join(workspacePath, ".github", "modernize", ".batch", "attempt-1");
+
+  const prepared = prepareAssessmentRun({
+    workspacePath,
+    runId: "20260817-120000",
+    language: "java",
+    domains: ["security"],
+    analysisCoverage: "full",
+    attemptScratchRoot,
+    maxConcurrency: 1,
+  });
+
+  assert.equal(prepared.attemptScratchRoot, path.resolve(attemptScratchRoot));
+  assert.equal(fs.statSync(attemptScratchRoot).isDirectory(), true);
+  assert.equal(prepared.maxConcurrentSubagents, 1);
+  assert.deepEqual(prepared.batches.map((batch) => batch.maxConcurrency), [1, 1]);
+  assert.equal(fs.readFileSync(canonicalFact, "utf8"), "single-mode-output");
+  for (const taskEntry of prepared.batches.flatMap((batch) => batch.tasks)) {
+    assert.equal(path.relative(attemptScratchRoot, taskEntry.outputPath).startsWith(".."), false);
+  }
+});
+
+test("concurrency ceilings of one and seven preserve the same Assessment task set", (t) => {
+  const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), "assessment-concurrency-"));
+  t.after(() => fs.rmSync(workspacePath, { recursive: true, force: true }));
+  const taskSignature = (plan) => plan.batches.flatMap((batch) =>
+    batch.tasks.map((taskEntry) => `${batch.id}:${taskEntry.skillId}`));
+
+  const sequential = prepareAssessmentRun({
+    workspacePath,
+    runId: "20260817-121000",
+    language: "java",
+    domains: ["security"],
+    analysisCoverage: "full",
+    attemptScratchRoot: path.join(workspacePath, "attempt-sequential"),
+    maxConcurrency: 1,
+  });
+  const maximum = prepareAssessmentRun({
+    workspacePath,
+    runId: "20260817-122000",
+    language: "java",
+    domains: ["security"],
+    analysisCoverage: "full",
+    attemptScratchRoot: path.join(workspacePath, "attempt-maximum"),
+    maxConcurrency: 7,
+  });
+
+  assert.deepEqual(taskSignature(sequential), taskSignature(maximum));
+  assert.deepEqual(sequential.batches.map(({ maxConcurrency }) => maxConcurrency), [1, 1]);
+  assert.deepEqual(maximum.batches.map(({ maxConcurrency }) => maxConcurrency), [7, 6]);
+});
+
 test("archive requires and copies exactly six fact documents", (t) => {
   const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), "assessment-facts-"));
   t.after(() => fs.rmSync(workspacePath, { recursive: true, force: true }));
@@ -166,4 +235,27 @@ test("archive requires and copies exactly six fact documents", (t) => {
     fs.existsSync(path.join(path.dirname(reportPath), "facts", "business-workflows.md")),
     true,
   );
+});
+
+test("archive reads batch facts from an attempt-scoped root", (t) => {
+  const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), "assessment-batch-facts-"));
+  t.after(() => fs.rmSync(workspacePath, { recursive: true, force: true }));
+  const reportPath = path.join(workspacePath, "reports", "report-1", "report.json");
+  const factsRoot = path.join(workspacePath, "attempts", "1", "engines", "facts");
+  fs.mkdirSync(path.dirname(reportPath), { recursive: true });
+  fs.mkdirSync(factsRoot, { recursive: true });
+  fs.writeFileSync(reportPath, "{}", "utf8");
+  for (const skillId of FACT_SKILL_IDS) {
+    fs.writeFileSync(path.join(factsRoot, `${skillId}.md`), `# ${skillId}\n`, "utf8");
+  }
+
+  const result = archiveFactFiles({
+    workspacePath,
+    reportPath,
+    analysisCoverage: "full",
+    factsRoot,
+  });
+
+  assert.equal(result.archived.length, 6);
+  assert.equal(fs.existsSync(path.join(path.dirname(reportPath), "facts", "dependency-map.md")), true);
 });

@@ -502,6 +502,17 @@ function splitOption(value) {
     : undefined;
 }
 
+function positiveIntegerOption(options, name) {
+  if (options[name] === undefined) {
+    return undefined;
+  }
+  const parsed = Number(options[name]);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(`--${name} must be a positive integer`);
+  }
+  return parsed;
+}
+
 function printResult(result) {
   console.log(JSON.stringify(result, null, 2));
 }
@@ -559,6 +570,8 @@ export async function main(argv = process.argv.slice(2)) {
         domains: splitOption(options.domains) ?? [],
         analysisCoverage: options.coverage ?? "issue-only",
         assessmentRoot: options["assessment-root"],
+        attemptScratchRoot: options["attempt-scratch-root"],
+        maxConcurrency: positiveIntegerOption(options, "max-concurrency"),
       }));
       return 0;
     }
@@ -571,6 +584,8 @@ export async function main(argv = process.argv.slice(2)) {
         language: requireOption(options, "language"),
         domains: splitOption(options.domains) ?? [],
         analysisCoverage: options.coverage ?? "issue-only",
+        attemptScratchRoot: options["attempt-scratch-root"],
+        maxConcurrency: positiveIntegerOption(options, "max-concurrency"),
       }));
       return 0;
     }
@@ -581,6 +596,7 @@ export async function main(argv = process.argv.slice(2)) {
         workspacePath: requireOption(options, "workspace-path"),
         reportPath: requireOption(options, "report"),
         analysisCoverage: options.coverage ?? "issue-only",
+        factsRoot: options["facts-root"],
       });
       printResult(result);
       return result.missing.length === 0 ? 0 : 1;

@@ -22,12 +22,15 @@ Working rules:
 | ID | Priority | Status | Issue | Blocks |
 |---|---|---|---|---|
 | BM-001 | P0 | Deferred | Takeover does not fence the previous worker | Stage 1 recovery |
-| BM-002 | P0 | Decided | `include_paths` has no execution-unit identity or enforceable scope | Stage 1 scope correctness |
-| BM-003 | P0 | Decided | Assessment correctness assumes six/seven simultaneous subagents | Stage 1 platform gate |
+| BM-002 | P0 | Open | `include_paths` has no execution-unit identity or enforceable scope | Stage 1 delivery |
+| BM-003 | P0 | Closed | Assessment correctness assumes six/seven simultaneous subagents | Stage 1 platform gate |
 | BM-004 | P1 | Deferred | `NeedsInput` has no complete persisted protocol | Stage 2 and Stage 3 |
 | BM-005 | P1 | Decided | Normal pause assumes unverified mid-invocation user signaling | Stage 1 pause UX |
 | BM-006 | P1 | Closed | Path, URL, branch, and clone safety rules are incomplete | Stage 1 workspace safety |
 | BM-007 | P1 | Decided | Retry, progress, skip, and aggregate-result semantics conflict | Stage 1 state model |
+| BM-008 | P0 | Open | Assessment result validation permits false success | Stage 1 delivery |
+| BM-009 | P0 | Open | Attempt lifecycle is not crash-consistent or replayable | Stage 1 delivery |
+| BM-010 | P0 | Open | Production agent chain has no real-host E2E evidence | Stage 1 delivery |
 
 ## 3. Open Issues
 
@@ -68,7 +71,7 @@ Takeover and cross-session retry are deferred from the initial Batch Assessment 
 ### BM-002: `include_paths` Lacks Execution-Unit Identity And Scope Enforcement
 
 - **Priority:** P0
-- **Status:** Decided
+- **Status:** Open
 - **Design references:** Sections 5.5, 7.5, 8.1, and 13.6 scenario 19
 
 **Problem**
@@ -91,6 +94,14 @@ Define an `executionUnitId` and canonical `scopeRoots`. Either run each included
 
 Repository identity and execution-unit identity are separate v1 contract fields. With no `include_paths`, the repository root is one execution unit. When `include_paths` is present, every valid recognized project path becomes its own execution unit and its canonical path becomes `workspacePath` and the sole initial `scopeRoot`; the root-plus-prompt-constraint alternative is rejected. Execution units sharing a Git root remain serialized. Stage 1A must implement canonical path enforcement before this issue can close.
 
+**Implementation evidence (2026-08-17)**
+
+`resolve-repos.test.mjs` and `inspect-workspaces.test.mjs` prove stable per-path execution-unit IDs, selected-root language detection, sibling exclusion, and canonical escape rejection. `batch-attempt.test.mjs` proves two include-path units in one Git root receive distinct request/result directories and exact single-root scopes, cannot overlap, and can continue independently after one ProtocolError. `batch-assessment` is contractually prohibited from widening the supplied workspace or scope.
+
+**Delivery review (2026-08-17)**
+
+Reopened because the third closure criterion is not satisfied by the cited tests. They prove resolver identity, selected-root language detection, artifact isolation, and serialization, but do not run the production phase agent with a sibling canary and prove that host search/read/edit capabilities cannot access the excluded path. Prompt-level prohibition is not an enforceable scope boundary. The initial private preview must reject `source: include-path` execution units until a host-level boundary or scoped tool wrapper passes the canary test.
+
 **Closure criteria**
 
 - State and result schemas distinguish repository identity from execution-unit identity.
@@ -100,7 +111,7 @@ Repository identity and execution-unit identity are separate v1 contract fields.
 ### BM-003: Assessment Requires Unverified Six/Seven-Way Concurrency
 
 - **Priority:** P0
-- **Status:** Decided
+- **Status:** Closed
 - **Design references:** Sections 7.1, 11, and 12 Stage 0
 
 **Problem**
@@ -122,6 +133,10 @@ Treat catalog concurrency as an upper bound. Define a scheduler that can use bou
 **Stage 0 decision (2026-08-12)**
 
 `maxConcurrency` is a ceiling, never a required pool size. The scheduler must preserve results at a configured limit of one and may use bounded waves up to the host-observed capacity. Copilot CLI 1.0.79 completed fan-outs of 1, 2, 6, and 7, but the same two-child request has been observed both serialized and overlapped across runs; scheduling is therefore not stable enough to be a correctness condition. A seven-child run with one injected tool failure still launched and completed all seven child invocations. The latest per-run observations are stored in `tests/batch-mode/stage0/evidence/platform-probe.json`.
+
+**Closure evidence (2026-08-17)**
+
+Stage 0 capacity tests prove invariant fact/security result contracts at ceilings 1, 2, 6, and 7 and fail closed on missing or duplicate results. `assessment-catalog.test.mjs` proves ceilings 1 and 7 preserve the same ordered task set while returning wave limits of 1/1 and 7/6. `batch-assessment` executes catalog-order bounded waves and treats missing or malformed task output as partial rather than success.
 
 **Closure criteria**
 
@@ -243,6 +258,90 @@ The initial Batch Assessment preview has no retry action. The v1 state contract 
 - Reopening a completed batch has a defined batch state.
 - Expected non-applicability does not degrade a successful aggregate result.
 
+### BM-008: Assessment Result Validation Permits False Success
+
+- **Priority:** P0
+- **Status:** Open
+- **Implementation references:** `skills/batch-modernization/scripts/validate-result.mjs`, `skills/batch-modernization/scripts/validate-result.test.mjs`
+
+**Problem**
+
+A completed Assessment currently requires only a parseable JSON object, a non-empty HTML file, and artifact paths within an allowed root. The validator does not require `evidence.artifactValidation: passed`, validate compatibility report version/shape, bind `metadata.runId` to the current attempt, or prove that approved facts/security tasks reached terminal states. The current positive test uses `{}`, arbitrary HTML, and `artifactValidation: not_run`.
+
+**Risk**
+
+An empty, stale, or unrelated report can be committed as Completed and propagated into the aggregate summary. User-visible success is therefore not independently supported by persisted evidence.
+
+**Delivery decision (2026-08-17)**
+
+Completed and Completed with issues are fail-closed states: both require attempt-bound, schema-valid Assessment evidence. Agent-authored status is never sufficient. Implement DQ-101 through DQ-106 in `BATCH_ASSESSMENT_DELIVERY_READINESS.md` before private preview.
+
+**Closure criteria**
+
+- A versioned schema validates report identity, status, categories, findings, and security results.
+- The report run identity is deterministically bound to the attempt request/result.
+- Approved full/security work has explicit terminal evidence, and `artifactValidation` is `passed`.
+- Empty JSON, arbitrary HTML, stale run IDs, missing task evidence, and `not_run` all map to ProtocolError.
+
+### BM-009: Attempt Lifecycle Is Not Crash-Consistent Or Replayable
+
+- **Priority:** P0
+- **Status:** Open
+- **Implementation references:** `skills/batch-modernization/scripts/batch-attempt.mjs`, `skills/batch-modernization/scripts/batch-state.mjs`
+
+**Problem**
+
+Attempt start and commit mutate request, state, repo validation, events, summary, and lease in separate operations. For example, commit marks the execution unit terminal before writing repository validation and the finish event. A process exit between those writes leaves a terminal state that cannot be committed again because replay requires Running state. Finalize can then produce a Completed summary without the missing validation artifact index.
+
+**Risk**
+
+The persisted files can disagree after an abnormal exit, recovery cannot distinguish a committed result from a partial commit, and a false terminal summary can survive across sessions.
+
+**Delivery decision (2026-08-17)**
+
+Introduce an immutable validation/commit record and deterministic reconciliation. Summary generation must consume committed validation records, not terminal state alone. Implement DQ-201 through DQ-205 in `BATCH_ASSESSMENT_DELIVERY_READINESS.md` before private preview.
+
+**Closure criteria**
+
+- Start, commit, and finalize are idempotent for the same immutable identity and reject conflicting identity.
+- Fault-injection tests cover every cross-file persistence boundary.
+- Reconciliation never guesses whether an uncommitted worker ran or succeeded.
+- No terminal success can exist without exactly one validated commit record.
+
+### BM-010: Production Agent Chain Has No Real-Host E2E Evidence
+
+- **Priority:** P0
+- **Status:** Open
+- **Implementation references:** `agents/modernize.agent.md`, `agents/batch-review.agent.md`, `agents/batch-coordinator.agent.md`, `agents/batch-assessment.agent.md`, `tests/batch-mode/stage1b/product-scenario-runner.mjs`, `tests/batch-mode/stage1b/product-evidence.mjs`, `tests/batch-mode/stage1b/real-repository-runner.mjs`
+
+**Problem**
+
+The Stage 0 host probe uses non-production fixture agents and proves only generic repeat invocation, nesting, tool inheritance, and fan-out behavior. Static tests assert text contracts in the production agents, but no test invokes the installed product chain from explicit user intent through Review/Start confirmation, two fresh phase invocations, evidence commit, and aggregate summary.
+
+**Risk**
+
+All Node and static contract tests can pass while routing, tool inheritance, plugin packaging, user confirmation, or child result publication fails in the actual host.
+
+**Delivery decision (2026-08-17)**
+
+Run a product-agent probe against the packaged plugin on Windows and POSIX. It must cover success, partial/protocol failure, user rejection, route ambiguity, and source-write canaries. Implement DQ-401 through DQ-407 in `BATCH_ASSESSMENT_DELIVERY_READINESS.md` before private preview.
+
+**Progress (2026-08-17)**
+
+- The production-plugin ACP runner, package smoke test, two-repository fixtures, structured Start/Cancel capture, persisted-artifact validator, source canaries, natural child-failure fixture, and manual Windows/Ubuntu workflow are implemented.
+- The early Windows evidence was quota-blocked and remains as historical blocker evidence in `tests/batch-mode/stage1b/evidence/real-repositories.win32-x64.json`.
+- After quota recovery, Retry 10 completed the real Windows chain against isolated copies of `spring-petclinic@88e37c1` and `airsonic-advanced@68d11bf`, model `auto`, and AppCAT `7.7.0.10`. Session `1b329554-15f2-46f9-93d4-04ed5761a608` used the strict exact `Start batch` follow-up because this host emitted no structured elicitation. Both attempts completed sequentially with distinct invocation IDs; report completeness passed with 11 and 34 findings respectively, and tracked files remained unchanged.
+- Retry 10's retained evidence has SHA-256 `8915ad9a5fc32227a6d346bec3c86abbc028f59e764592cbeb222d6d44c922f4` and product package digest `c61be8b446be783b8079bda2ba9a866ae8f37fdc9fb0485c837db220ec7d96e3`. A portable sanitized copy still needs to replace the historical blocker record.
+- The current-package Windows matrix is `incomplete`: explicit success, Cancel, unsupported Planning/Execution, and ambiguous single-repository routing pass. Natural failure injection is rejected before phase dispatch, while missing-result and partial-Assessment cannot run because ACP emits no permission events. These are `not_supported`, not product passes or failures.
+- No POSIX product-host record exists. BM-010 remains Open and Stage 1B remains delivery No-Go.
+
+**Closure criteria**
+
+- The packaged `modernize -> batch-coordinator -> batch-assessment` chain completes a two-repository Assessment on Windows and POSIX.
+- Evidence records distinct child invocations, attempt-bound reports, sequential scheduling, and an aggregate summary.
+- Failure and user-rejection scenarios do not fallback to parent-agent work or enable Planning/Execution.
+- Packaging smoke tests verify every required agent, skill, schema, script, hook, and runtime bootstrap file.
+
 ## 4. Confirmed Non-Issues
 
 The following points were reviewed and are currently consistent. Do not reopen them without new evidence:
@@ -267,3 +366,12 @@ The following points were reviewed and are currently consistent. Do not reopen t
 | 2026-08-12 | BM-006 | Require canonical containment, complete redaction, and atomic clone publish | Decided | Stage 0 capability review |
 | 2026-08-12 | BM-007 | Defer retry; separate non-applicable, excluded, and blocked states | Decided | Stage 0 batch-state v1 |
 | 2026-08-12 | BM-006 | Stage 1A path, Git, credential, and clone safety implementation verified | Closed | `skills/batch-modernization/scripts/*.test.mjs` |
+| 2026-08-17 | BM-002 | Per-path identity, exact scope, isolated artifacts, and same-Git-root serialization verified | Closed | `inspect-workspaces.test.mjs`; `batch-attempt.test.mjs` |
+| 2026-08-17 | BM-003 | Capacity-independent task sets, bounded waves, and partial-result semantics verified | Closed | Stage 0 capacity tests; `assessment-catalog.test.mjs` |
+| 2026-08-17 | BM-002 | Reopened: production phase-agent sibling read/write exclusion is not proven | Open | Delivery readiness review; host canary pending |
+| 2026-08-17 | BM-008 | Fail closed on incomplete, stale, or unbound Assessment evidence | Open | DQ-101 through DQ-106 |
+| 2026-08-17 | BM-009 | Require replayable commit records and crash-boundary tests | Open | DQ-201 through DQ-205 |
+| 2026-08-17 | BM-010 | Require packaged production-agent E2E on Windows and POSIX | Open | DQ-401 through DQ-407 |
+| 2026-08-17 | BM-010 | Product probe harness completed; Windows host blocked by quota before tools | Open | `tests/batch-mode/stage1b/evidence/product-probe.win32-x64.json` |
+| 2026-08-17 | BM-010 | Real two-repository Windows probe blocked by quota before tools; reports not generated | Open | `tests/batch-mode/stage1b/evidence/real-repositories.win32-x64.json` |
+| 2026-08-17 | BM-010 | Retry 10 real Windows two-repository success path passed; negative matrix and POSIX remain incomplete | Open | Session `1b329554-15f2-46f9-93d4-04ed5761a608`; evidence SHA-256 `8915ad9a...922f4` |

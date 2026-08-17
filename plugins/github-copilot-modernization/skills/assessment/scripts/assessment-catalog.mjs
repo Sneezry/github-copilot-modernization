@@ -35,35 +35,48 @@ function task(skillId, outputPath) {
   return { skillId, outputPath };
 }
 
+function resolveConcurrency(taskCount, maxConcurrency) {
+  if (maxConcurrency === undefined || maxConcurrency === null) {
+    return taskCount;
+  }
+  if (!Number.isInteger(maxConcurrency) || maxConcurrency < 1) {
+    throw new Error("maxConcurrency must be a positive integer");
+  }
+  return Math.min(taskCount, maxConcurrency);
+}
+
 export function buildAssessmentPlan({
   domains = [],
   analysisCoverage = "issue-only",
   assessmentRoot = path.join(".github", "modernize", "assessment"),
+  attemptScratchRoot,
+  maxConcurrency,
 } = {}) {
   if (!SUPPORTED_COVERAGE.has(analysisCoverage)) {
     throw new Error(`Unsupported analysis coverage: ${analysisCoverage}`);
   }
 
   const selectedDomains = normalizeDomains(domains);
+  const taskOutputRoot = attemptScratchRoot ?? assessmentRoot;
   const batches = [];
 
   if (selectedDomains.includes("security")) {
-    const securityRoot = path.join(assessmentRoot, "engines", "security", "incoming");
+    const securityRoot = path.join(taskOutputRoot, "engines", "security", "incoming");
     batches.push({
       id: "security",
       execution: "parallel",
-      maxConcurrency: SECURITY_SKILL_IDS.length,
+      maxConcurrency: resolveConcurrency(SECURITY_SKILL_IDS.length, maxConcurrency),
       tasks: SECURITY_SKILL_IDS.map((skillId) =>
         task(skillId, path.join(securityRoot, `${skillId}.json`))),
     });
   }
 
   if (analysisCoverage === "full") {
-    const factsRoot = path.join(assessmentRoot, "engines", "facts");
+    const factsRoot = path.join(taskOutputRoot, "engines", "facts");
     batches.push({
       id: "facts",
       execution: "parallel",
-      maxConcurrency: FACT_SKILL_IDS.length,
+      maxConcurrency: resolveConcurrency(FACT_SKILL_IDS.length, maxConcurrency),
       tasks: FACT_SKILL_IDS.map((skillId) =>
         task(skillId, path.join(factsRoot, `${skillId}.md`))),
     });
@@ -114,6 +127,8 @@ export function prepareAssessmentRun({
   language,
   domains = [],
   analysisCoverage = "issue-only",
+  attemptScratchRoot,
+  maxConcurrency,
 } = {}) {
   if (!workspacePath || !runId || !language) {
     throw new Error("workspacePath, runId, and language are required");
@@ -124,9 +139,19 @@ export function prepareAssessmentRun({
   const memoryDir = path.join(workspaceRoot, ".github", "modernize", ".memory");
   const runDir = path.join(memoryDir, "runs", runId);
   const findingsPath = path.join(memoryDir, "findings.yaml");
-  const plan = buildAssessmentPlan({ domains, analysisCoverage, assessmentRoot });
+  const resolvedScratchRoot = attemptScratchRoot
+    ? path.resolve(attemptScratchRoot)
+    : null;
+  const plan = buildAssessmentPlan({
+    domains,
+    analysisCoverage,
+    assessmentRoot,
+    attemptScratchRoot: resolvedScratchRoot,
+    maxConcurrency,
+  });
 
   fs.mkdirSync(memoryDir, { recursive: true });
+  if (resolvedScratchRoot) fs.mkdirSync(resolvedScratchRoot, { recursive: true });
   if (!fs.existsSync(findingsPath)) {
     fs.writeFileSync(findingsPath, "version: 1\nfindings: []\n", "utf8");
   }
@@ -143,6 +168,7 @@ export function prepareAssessmentRun({
     ...plan,
     workspacePath: workspaceRoot,
     assessmentRoot,
+    attemptScratchRoot: resolvedScratchRoot,
     memoryDir,
     runDir,
     findingsPath,
@@ -152,7 +178,7 @@ export function prepareAssessmentRun({
   };
 }
 
-export function archiveFactFiles({ workspacePath, reportPath, analysisCoverage } = {}) {
+export function archiveFactFiles({ workspacePath, reportPath, analysisCoverage, factsRoot } = {}) {
   if (analysisCoverage !== "full") {
     return { archived: [], missing: [] };
   }
@@ -160,14 +186,16 @@ export function archiveFactFiles({ workspacePath, reportPath, analysisCoverage }
     throw new Error("workspacePath and reportPath are required");
   }
 
-  const sourceDir = path.join(
-    path.resolve(workspacePath),
-    ".github",
-    "modernize",
-    "assessment",
-    "engines",
-    "facts",
-  );
+  const sourceDir = factsRoot
+    ? path.resolve(factsRoot)
+    : path.join(
+      path.resolve(workspacePath),
+      ".github",
+      "modernize",
+      "assessment",
+      "engines",
+      "facts",
+    );
   const destinationDir = path.join(path.dirname(path.resolve(reportPath)), "facts");
   const missing = FACT_SKILL_IDS.filter(
     (skillId) => !fs.existsSync(path.join(sourceDir, `${skillId}.md`)),
