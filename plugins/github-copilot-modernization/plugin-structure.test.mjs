@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const pluginRoot = path.dirname(fileURLToPath(import.meta.url));
 const skillsRoot = path.join(pluginRoot, "skills");
+const agentsRoot = path.join(pluginRoot, "agents");
 const thisFile = fileURLToPath(import.meta.url);
 
 function walkFiles(root) {
@@ -31,8 +32,26 @@ test("every plugin skill is one direct child of the skills root", () => {
 
   for (const skillFile of skillFiles) {
     const directory = path.basename(path.dirname(skillFile));
-    const declaredName = fs.readFileSync(skillFile, "utf8").match(/^name:\s*['"]?([^'"\r\n]+)['"]?$/m)?.[1];
+    const content = fs.readFileSync(skillFile, "utf8");
+    const declaredName = content.match(/^name:\s*['"]?([^'"\r\n]+)['"]?$/m)?.[1];
     assert.equal(declaredName, directory, skillFile);
+    assert.match(content, /^user-invocable:\s*false$/m, `${skillFile} must be internal`);
+  }
+});
+
+test("modernize is the only user-invocable plugin agent", () => {
+  const agentFiles = fs.readdirSync(agentsRoot)
+    .filter((name) => name.endsWith(".agent.md"));
+  for (const name of agentFiles) {
+    const content = fs.readFileSync(path.join(agentsRoot, name), "utf8");
+    const agentName = content.match(/^name:\s*['"]?([^'"\r\n]+)['"]?$/m)?.[1];
+    const userInvocable = content.match(/^user-invocable:\s*(true|false)$/m)?.[1];
+    assert.ok(agentName, `${name} must declare a name`);
+    assert.equal(
+      userInvocable,
+      agentName === "modernize" ? "true" : "false",
+      `${name} has an invalid user-invocable value`,
+    );
   }
 });
 

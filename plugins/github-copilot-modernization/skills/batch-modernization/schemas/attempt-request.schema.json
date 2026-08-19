@@ -12,6 +12,9 @@
     "executionUnitId",
     "workspacePath",
     "scopeRoots",
+    "assessmentCliPath",
+    "runId",
+    "language",
     "phase",
     "attempt",
     "mode",
@@ -54,6 +57,22 @@
         "minLength": 1
       }
     },
+    "assessmentCliPath": {
+      "type": "string",
+      "minLength": 1
+    },
+    "runId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "language": {
+      "enum": [
+        "java",
+        "dotnet",
+        "javascript",
+        "typescript"
+      ]
+    },
     "phase": {
       "enum": [
         "assessment",
@@ -87,7 +106,35 @@
       }
     },
     "decisions": {
-      "type": "object"
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["domains", "analysisCoverage", "maxConcurrency"],
+      "properties": {
+        "domains": {
+          "type": "array",
+          "minItems": 0,
+          "uniqueItems": true,
+          "items": { "enum": ["security", "cloud-readiness", "java-upgrade"] }
+        },
+        "analysisCoverage": { "enum": ["issue-only", "full"] },
+        "maxConcurrency": { "type": "integer", "minimum": 1, "maximum": 7 },
+        "targetRuntime": { "type": "string", "minLength": 1 },
+        "targetComputeServices": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "enableContainerization": { "type": "boolean" },
+        "targetOS": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "minimumCveSeverity": { "type": "string", "minLength": 1 },
+        "cveScanScope": { "type": "string", "minLength": 1 }
+      }
     }
   }
 }

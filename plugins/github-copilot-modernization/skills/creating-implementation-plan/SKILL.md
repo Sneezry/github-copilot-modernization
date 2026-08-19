@@ -4,6 +4,7 @@ description: |
   Creates an implementation plan AND task breakdown from a feature spec by consuming design artifacts. Produces plan.md with implementation steps, inline task list with full REQ traceability, and a Requirement Mapping table. This is the single skill for planning + decomposition.
   Triggers: "create implementation plan", "plan for implementation", "assemble implementation plan", "generate plan from spec", "break down tasks", "generate tasks from plan", "create implementation tasks", "decompose the plan into work items".
   NOT for: architecture analysis (use analyzing-architecture), implementation (use implementing-code), coordinator task decomposition.
+user-invocable: false
 ---
 
 ## User Input

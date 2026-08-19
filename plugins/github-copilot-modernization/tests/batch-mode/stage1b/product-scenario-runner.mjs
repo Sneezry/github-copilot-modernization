@@ -36,14 +36,19 @@ const defaultEvidencePath = path.join(
 );
 const REQUIRED_PROBES = [
   "explicitBatchSuccess",
+  "defaultConfigBatchSelection",
+  "defaultConfigSingleSelection",
   "cancelBeforeApproval",
   "unsupportedBatchPlanning",
   "unsupportedBatchExecution",
-  "ambiguousSingleRepository",
   "naturalChildFailureContinuation",
+];
+const DIAGNOSTIC_PERMISSION_PROBES = [
   "missingResultContinuation",
   "partialAssessmentContinuation",
 ];
+const BATCH_MODE_CHOICE = "Process repositories from repos.json";
+const SINGLE_MODE_CHOICE = "Only process the current repository";
 
 export class ProductHostBlocker extends Error {
   constructor(code, message, hostEvidence = {}) {
@@ -93,14 +98,14 @@ function errorText(error) {
   return String(error?.stack ?? error?.message ?? error).slice(-4_000);
 }
 
-export function classifyProductHostBlocker(hostErrors = []) {
+export function classifyProductHostBlocker(hostErrors = [], { fallback = true } = {}) {
   const text = hostErrors.join(" ").toLowerCase();
   if (!text) return null;
   if (/quota|payment|402/.test(text)) return "copilot_quota_exhausted";
   if (/authentication/.test(text)) return "copilot_authentication_failed";
   if (/model/.test(text) && /available|unavailable/.test(text)) return "copilot_model_unavailable";
   if (/rate limit/.test(text)) return "copilot_rate_limited";
-  return "copilot_host_error";
+  return fallback ? "copilot_host_error" : null;
 }
 
 function compactToolCalls(toolCalls = []) {
@@ -180,7 +185,8 @@ async function invokeAcpChecked(options) {
   } catch (error) {
     if (error instanceof ProductHostBlocker) throw error;
     const hostEvidence = error.acpEvidence ?? {};
-    const code = classifyProductHostBlocker(hostEvidence.hostErrors);
+    const code = classifyProductHostBlocker(hostEvidence.hostErrors)
+      ?? classifyProductHostBlocker([error.message, error.stack].filter(Boolean), { fallback: false });
     if (code) {
       throw new ProductHostBlocker(code, `Copilot product host blocked the probe: ${(hostEvidence.hostErrors ?? []).join(", ")}`, compactAcpEvidence(hostEvidence));
     }
@@ -191,7 +197,8 @@ async function invokeAcpChecked(options) {
 function checkedRouteRun(options) {
   const run = invokeProductAgent(options);
   const host = summarizeAcpTranscript([], `${run.response}\n${run.stderr}`);
-  const code = classifyProductHostBlocker(host.hostErrors);
+  const code = classifyProductHostBlocker(host.hostErrors)
+    ?? classifyProductHostBlocker([run.response, run.stderr], { fallback: false });
   if (code) {
     throw new ProductHostBlocker(code, `Copilot product host blocked the route probe: ${host.hostErrors.join(", ")}`, {
       sessionId: run.sessionId,
@@ -214,6 +221,19 @@ function batchPrompt(fixture, {
     + `Select ${domains.join(", ")}, ${analysisCoverage} coverage, and maxConcurrency 1. Show the Review and ask for `
     + "Start batch or Cancel. This prompt supplies decisions but is not approval; only a later structured "
     + "choice or a fresh user turn whose entire content is exactly Start batch is authoritative.";
+}
+
+function defaultConfigAssessmentPrompt() {
+  return "Assess for cloud readiness with issue-only coverage and maxConcurrency 1. The workspace scope is intentionally "
+    + "unspecified. Follow the product workspace-mode contract before any assessment; do not infer Single or Batch.";
+}
+
+function selectBatchModeThenStart(params) {
+  const schemaText = JSON.stringify(params?.requestedSchema ?? {});
+  return acceptFormElicitation(
+    params,
+    schemaText.includes(BATCH_MODE_CHOICE) ? BATCH_MODE_CHOICE : "Start batch",
+  );
 }
 
 function createScenarioFixture(prefix, options) {
@@ -245,6 +265,8 @@ async function runApprovedBatch({
   analysisCoverage,
   deniedPermissionTarget,
   expectedStatuses,
+  selectDefaultConfig = true,
+  ambiguousScope = false,
 }) {
   const fixture = createScenarioFixture(
     failureRepository ? "batch-stage1b-child-failure" : "batch-stage1b-success",
@@ -255,14 +277,21 @@ async function runApprovedBatch({
   const permissionController = deniedPermissionTarget
     ? createPermissionDenialController(deniedPermissionTarget)
     : null;
+  let run;
   try {
-    const run = await invokeAcpChecked({
+    run = await invokeAcpChecked({
       workspacePath: fixture.launchRoot,
-      prompt: batchPrompt(fixture, { domains, analysisCoverage }),
-      followUpPrompts: ["Start batch"],
+      prompt: ambiguousScope
+        ? defaultConfigAssessmentPrompt()
+        : batchPrompt(fixture, { domains, analysisCoverage }),
+      followUpPrompts: selectDefaultConfig
+        ? [BATCH_MODE_CHOICE, "Start batch"]
+        : ["Start batch"],
       model,
       copilotPath,
-      elicitationHandler: (params) => acceptFormElicitation(params, "Start batch"),
+      elicitationHandler: selectDefaultConfig
+        ? selectBatchModeThenStart
+        : (params) => acceptFormElicitation(params, "Start batch"),
       allowAllTools: permissionController === null,
       permissionHandler: permissionController?.handler,
     });
@@ -297,7 +326,13 @@ async function runApprovedBatch({
         host: compactAcpEvidence(run),
       };
     }
-    const validation = validateCompletedProductRun({ fixture, batchRoot, acpRun: run, approvalMode });
+    const validation = validateCompletedProductRun({
+      fixture,
+      batchRoot,
+      acpRun: run,
+      approvalMode,
+      scopeMode: selectDefaultConfig ? "default-config" : "explicit",
+    });
     const statuses = validation.attempts.map((attempt) => attempt.status);
     if (expectedStatuses) {
       assertCondition(
@@ -329,6 +364,15 @@ async function runApprovedBatch({
       host: compactAcpEvidence(run),
       validation,
     };
+  } catch (error) {
+    if (run && !error.acpEvidence) error.acpEvidence = run;
+    error.fixtureEvidence = {
+      fixtureSha256,
+      fixtureVariant: fixture.variant,
+      workspaceRetained: keepWorkspaces,
+      launchRoot: fixture.launchRoot,
+    };
+    throw error;
   } finally {
     cleanupFixture(fixture, keepWorkspaces);
   }
@@ -338,14 +382,21 @@ async function runCancel({ copilotPath, model, keepWorkspaces }) {
   const fixture = createScenarioFixture("batch-stage1b-cancel");
   const previousRoots = listBatchRoots(fixture.launchRoot);
   const fixtureSha256 = computeProductFixtureDigest(fixture);
+  let run;
   try {
-    const run = await invokeAcpChecked({
+    run = await invokeAcpChecked({
       workspacePath: fixture.launchRoot,
       prompt: batchPrompt(fixture),
-      followUpPrompts: ["Cancel"],
+      followUpPrompts: [BATCH_MODE_CHOICE, "Cancel"],
       model,
       copilotPath,
-      elicitationHandler: (params) => acceptFormElicitation(params, "Cancel"),
+      elicitationHandler: (params) => {
+        const schemaText = JSON.stringify(params?.requestedSchema ?? {});
+        return acceptFormElicitation(
+          params,
+          schemaText.includes(BATCH_MODE_CHOICE) ? BATCH_MODE_CHOICE : "Cancel",
+        );
+      },
     });
     const batchRoot = discoverNewBatchRoot(fixture.launchRoot, previousRoots);
     const approvalMode = run.elicitationResponses.length > 0 ? "structured" : "explicit-follow-up";
@@ -355,8 +406,22 @@ async function runCancel({ copilotPath, model, keepWorkspaces }) {
       workspaceRetained: keepWorkspaces,
       launchRoot: fixture.launchRoot,
       host: compactAcpEvidence(run),
-      validation: validateCancelledProductRun({ fixture, batchRoot, acpRun: run, approvalMode }),
+      validation: validateCancelledProductRun({
+        fixture,
+        batchRoot,
+        acpRun: run,
+        approvalMode,
+        scopeMode: "default-config",
+      }),
     };
+  } catch (error) {
+    if (run && !error.acpEvidence) error.acpEvidence = run;
+    error.fixtureEvidence = {
+      fixtureSha256,
+      workspaceRetained: keepWorkspaces,
+      launchRoot: fixture.launchRoot,
+    };
+    throw error;
   } finally {
     cleanupFixture(fixture, keepWorkspaces);
   }
@@ -373,7 +438,7 @@ function runUnsupportedRoute({ action, copilotPath, model }) {
         + "using repos.json in batch mode. Do not assess or modify anything; state whether this Stage 1B action is available.",
     });
     assertCondition(
-      /not (?:available|supported)|supports only Batch Assessment/i.test(run.response),
+      /not (?:available|supported)|does not support|supports only Batch Assessment/i.test(run.response),
       `Product route did not reject Batch ${action}: ${run.response}`,
     );
     return {
@@ -388,21 +453,40 @@ function runUnsupportedRoute({ action, copilotPath, model }) {
   }
 }
 
-function runAmbiguousSingleRoute({ copilotPath, model, keepWorkspaces }) {
+async function runDefaultConfigSingleSelection({ copilotPath, model, keepWorkspaces }) {
   const fixture = createScenarioFixture("batch-stage1b-single-route");
   const fixtureSha256 = computeProductFixtureDigest(fixture);
   try {
-    const run = checkedRouteRun({
+    const run = await invokeAcpChecked({
       workspacePath: fixture.launchRoot,
       copilotPath,
       model,
-      prompt: "Assess this repository for cloud readiness. For this route check, stop after classifying the scope and "
-        + "name the single-repository coordinator you would use; do not invoke it or inspect source.",
+      prompt: "Assess for cloud readiness. The workspace scope is intentionally unspecified. Follow the product "
+        + "workspace-mode contract first. After a mode is selected, stop after naming the route; do not invoke a phase coordinator.",
+      followUpPrompts: [SINGLE_MODE_CHOICE],
+      elicitationHandler: (params) => acceptFormElicitation(params, SINGLE_MODE_CHOICE),
     });
-    assertCondition(listBatchRoots(fixture.launchRoot).length === 0, "Ambiguous request created a batch Review");
+    const probeCalls = (run.toolCalls ?? []).filter((toolCall) =>
+      toolCallSelectsProductAgent(toolCall, "batch-mode-probe"));
+    const reviewCalls = (run.toolCalls ?? []).filter((toolCall) =>
+      toolCallSelectsProductAgent(toolCall, "batch-review"));
+    const coordinatorCalls = (run.toolCalls ?? []).filter((toolCall) =>
+      toolCallSelectsProductAgent(toolCall, "batch-coordinator"));
+    assertCondition(probeCalls.length === 1, `Expected one exact batch-mode-probe call, found ${probeCalls.length}`);
+    assertCondition(reviewCalls.length === 0, "Single selection unexpectedly invoked batch-review");
+    assertCondition(coordinatorCalls.length === 0, "Single selection unexpectedly invoked batch-coordinator");
+    if (run.elicitationResponses.length > 0) {
+      const choices = run.elicitationResponses.flatMap(({ response }) =>
+        Object.values(response?.content ?? {}).map(String));
+      assertCondition(choices.includes(SINGLE_MODE_CHOICE), "Structured mode selection did not choose the current repository");
+    } else {
+      assertCondition(run.userPrompts?.length === 2, `Expected two explicit mode-selection turns, found ${run.userPrompts?.length ?? 0}`);
+      assertCondition(run.userPrompts[1] === SINGLE_MODE_CHOICE, "Explicit Single selection was not exact");
+    }
+    assertCondition(listBatchRoots(fixture.launchRoot).length === 0, "Single selection created a batch Review");
     assertCondition(
-      /single|assessment-coordinator/i.test(run.response),
-      `Ambiguous request did not identify the single-repository route: ${run.response}`,
+      /single|assessment-coordinator/i.test(run.agentText),
+      `Single selection did not identify the classic single-repository route: ${run.agentText}`,
     );
     const canaries = verifyProductSourceCanaries(fixture);
     assertCondition(canaries.valid, `Ambiguous route changed source canaries: ${canaries.changed.join(", ")}`);
@@ -411,10 +495,7 @@ function runAmbiguousSingleRoute({ copilotPath, model, keepWorkspaces }) {
       fixtureSha256,
       workspaceRetained: keepWorkspaces,
       launchRoot: fixture.launchRoot,
-      sessionId: run.sessionId,
-      models: run.models,
-      durationMs: run.durationMs,
-      response: run.response,
+      host: compactAcpEvidence(run),
       sourceCanaries: canaries,
     };
   } finally {
@@ -426,8 +507,43 @@ export function finalProductProbeStatus(probes, failureMatrix) {
   if (Object.values(probes).some((probe) => probe?.status === "failed")) return "failed";
   if (Object.values(probes).some((probe) => probe?.status === "blocked")) return "blocked";
   if (REQUIRED_PROBES.some((name) => probes[name]?.status !== "passed")) return "incomplete";
-  if (Object.values(failureMatrix).some((entry) => entry.productHostStatus !== "passed")) return "incomplete";
+  if (failureMatrix.childFailure?.productHostStatus !== "passed") return "incomplete";
+  for (const name of DIAGNOSTIC_PERMISSION_PROBES) {
+    if (!["passed", "not_supported"].includes(probes[name]?.status)) return "incomplete";
+  }
+  for (const [probeName, matrixName] of [
+    ["missingResultContinuation", "missingResult"],
+    ["partialAssessmentContinuation", "partialAssessment"],
+  ]) {
+    const probe = probes[probeName];
+    const matrix = failureMatrix[matrixName];
+    if (matrix?.controlPlaneStatus !== "passed") return "incomplete";
+    const expectedHostStatus = probe.status === "passed" ? "passed" : "not_run";
+    if (matrix.productHostStatus !== expectedHostStatus) return "incomplete";
+  }
   return "passed";
+}
+
+export function inheritedUnsupportedProbe(name, probes) {
+  if (name !== "partialAssessmentContinuation") return null;
+  const missingResult = probes.missingResultContinuation;
+  if (missingResult?.status !== "not_supported"
+      || missingResult.code !== "acp_permission_events_unavailable") {
+    return null;
+  }
+  return {
+    status: "not_supported",
+    code: "acp_permission_events_unavailable",
+    reason: "The same ACP host emitted no permission events during the missing-result capability probe",
+    inheritedFrom: "missingResultContinuation",
+  };
+}
+
+export function reusableProbe(name, probe) {
+  return probe?.status === "passed"
+    || (DIAGNOSTIC_PERMISSION_PROBES.includes(name)
+      && probe?.status === "not_supported"
+      && probe?.code === "acp_permission_events_unavailable");
 }
 
 function resumableEvidence(outputPath, identity, resume) {
@@ -497,11 +613,21 @@ export async function runProductScenarioProbe({
   atomicWriteJson(outputPath, evidence);
 
   const scenarios = [
+    ["defaultConfigSingleSelection", () => runDefaultConfigSingleSelection({
+      copilotPath: executable,
+      model,
+      keepWorkspaces,
+    })],
+    ["defaultConfigBatchSelection", () => runApprovedBatch({
+      copilotPath: executable,
+      model,
+      keepWorkspaces,
+      ambiguousScope: true,
+    })],
     ["explicitBatchSuccess", () => runApprovedBatch({ copilotPath: executable, model, keepWorkspaces })],
     ["cancelBeforeApproval", () => runCancel({ copilotPath: executable, model, keepWorkspaces })],
     ["unsupportedBatchPlanning", () => runUnsupportedRoute({ action: "planning", copilotPath: executable, model })],
     ["unsupportedBatchExecution", () => runUnsupportedRoute({ action: "execution", copilotPath: executable, model })],
-    ["ambiguousSingleRepository", () => runAmbiguousSingleRoute({ copilotPath: executable, model, keepWorkspaces })],
     ["naturalChildFailureContinuation", () => runApprovedBatch({
       copilotPath: executable,
       model,
@@ -527,7 +653,13 @@ export async function runProductScenarioProbe({
   ];
   let hostBlocker = null;
   for (const [name, execute] of scenarios) {
-    if (evidence.probes[name]?.status === "passed") continue;
+    if (reusableProbe(name, evidence.probes[name])) continue;
+    const inherited = inheritedUnsupportedProbe(name, evidence.probes);
+    if (inherited) {
+      evidence.probes[name] = inherited;
+      atomicWriteJson(outputPath, evidence);
+      continue;
+    }
     if (hostBlocker) {
       evidence.probes[name] = { status: "not_run", reason: `Blocked by ${hostBlocker.code}` };
       continue;
@@ -553,7 +685,12 @@ export async function runProductScenarioProbe({
           host: error.hostEvidence,
         };
       } else {
-        evidence.probes[name] = { status: "failed", error: errorText(error) };
+        evidence.probes[name] = {
+          status: "failed",
+          error: errorText(error),
+          ...(error.fixtureEvidence ?? {}),
+          ...(error.acpEvidence ? { host: compactAcpEvidence(error.acpEvidence) } : {}),
+        };
       }
     }
     atomicWriteJson(outputPath, evidence);

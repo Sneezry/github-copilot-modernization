@@ -176,6 +176,9 @@ test("redaction removes credentials from free-form errors", () => {
   const redacted = redactSecrets("failed https://user:token@example.com/org/repo.git?secret=x#frag");
   assert.doesNotMatch(redacted, /user|token|secret=x|frag/);
   assert.match(redacted, /https:\/\/example\.com\/org\/repo\.git/);
+  const http = redactSecrets("failed http://user:token@example.com/org/repo.git?secret=x#frag");
+  assert.doesNotMatch(http, /user|token|secret=x|frag/);
+  assert.equal(http, "failed <redacted-git-url>");
 });
 
 test("workspace inspection rejects malformed resolved documents before touching paths", () => {

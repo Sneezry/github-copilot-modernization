@@ -193,8 +193,35 @@ test("bootstrap creates an independent Assessment runtime in every target worksp
       path.join(workspaces[index], ".github", "modernize", ".runtime", "assessment"),
     );
     assert.equal(fs.existsSync(path.join(destination, "assess-cli.mjs")), true);
+    assert.deepEqual(
+      JSON.parse(fs.readFileSync(path.join(destination, "solution-mapping.json"), "utf8")),
+      JSON.parse(fs.readFileSync(path.resolve(path.dirname(scriptPath), "..", "resources", "solution-mapping.json"), "utf8")),
+    );
     assert.equal(fs.readFileSync(path.join(destination, ".gitignore"), "utf8"), "*\n!.gitignore\n");
   }
+});
+
+test("a bootstrapped runtime can bootstrap another workspace with solution mapping", () => {
+  const parent = createTemporaryDirectory();
+  const firstWorkspace = path.join(parent, "first");
+  const secondWorkspace = path.join(parent, "second");
+  fs.mkdirSync(firstWorkspace);
+  fs.mkdirSync(secondWorkspace);
+  const first = spawnSync(
+    process.execPath,
+    [scriptPath, "bootstrap", "--workspace-path", firstWorkspace],
+    { encoding: "utf8" },
+  );
+  assert.equal(first.status, 0, first.stderr);
+  const runtimeCli = JSON.parse(first.stdout).cliPath;
+  const second = spawnSync(
+    process.execPath,
+    [runtimeCli, "bootstrap", "--workspace-path", secondWorkspace],
+    { encoding: "utf8" },
+  );
+  assert.equal(second.status, 0, second.stderr);
+  const secondRuntime = JSON.parse(second.stdout).destination;
+  assert.equal(fs.existsSync(path.join(secondRuntime, "solution-mapping.json")), true);
 });
 
 test("prepare-run CLI passes batch scratch and concurrency options", () => {
@@ -212,6 +239,12 @@ test("prepare-run CLI passes batch scratch and concurrency options", () => {
       "--coverage", "full",
       "--attempt-scratch-root", attemptScratchRoot,
       "--max-concurrency", "1",
+      "--target-runtime", "java-21",
+      "--target-compute-services", "azure-container-apps,app-service",
+      "--enable-containerization", "true",
+      "--target-os", "linux",
+      "--minimum-cve-severity", "high",
+      "--cve-scan-scope", "all",
     ],
     { encoding: "utf8" },
   );
@@ -221,6 +254,14 @@ test("prepare-run CLI passes batch scratch and concurrency options", () => {
   assert.equal(plan.attemptScratchRoot, path.resolve(attemptScratchRoot));
   assert.equal(fs.statSync(attemptScratchRoot).isDirectory(), true);
   assert.deepEqual(plan.batches.map((batch) => batch.maxConcurrency), [1, 1]);
+  assert.deepEqual(plan.assessmentConfig, {
+    targetRuntime: "java-21",
+    targetComputeServices: ["azure-container-apps", "app-service"],
+    enableContainerization: true,
+    targetOS: ["linux"],
+    minimumCveSeverity: "high",
+    cveScanScope: "all",
+  });
   assert.equal(
     plan.batches.flatMap((batch) => batch.tasks).every(
       (taskEntry) => !path.relative(attemptScratchRoot, taskEntry.outputPath).startsWith(".."),

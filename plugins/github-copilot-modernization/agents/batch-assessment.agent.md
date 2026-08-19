@@ -42,22 +42,25 @@ Run exactly one approved Assessment attempt. The v1 attempt request artifact is 
 
 ## Process
 
-1. Read only the supplied absolute `request.json`. Stop phase work if its identity, mode, approval, workspace, or decisions are absent.
-2. Resolve `plugin-root` from `CLAUDE_PLUGIN_ROOT`, `COPILOT_PLUGIN_ROOT`, or `PLUGIN_ROOT`.
+1. Read only the supplied absolute `request.json`. Stop phase work if its identity, mode, approval, workspace, `assessmentCliPath`, `runId`, `language`, or decisions are absent. Use the exact request-provided `assessmentCliPath`, `runId`, and `language` for every Assessment runtime command; never synthesize or replace them. `assessmentCliPath` must be an absolute existing file.
+2. Never read or interpolate `CLAUDE_PLUGIN_ROOT`, `COPILOT_PLUGIN_ROOT`, or `PLUGIN_ROOT`; the control plane already bound the Assessment CLI path into the immutable request.
 3. Explicitly bootstrap the target workspace on every invocation:
 
 ```powershell
-node <plugin-root>/skills/assessment/scripts/assess-cli.mjs bootstrap `
+node <request.assessmentCliPath> bootstrap `
 	--workspace-path <request.workspacePath>
 ```
 
-If bootstrap exits nonzero, do not repair or retry the workspace and do not continue Assessment. Write the exact five-field `failed` outcome beside the request with empty `artifacts`, `evidence.artifactValidation: "not_run"`, `needsInput: null`, and a sanitized structured `error`, then invoke `publish` exactly once.
+If bootstrap exits nonzero, do not repair or retry the workspace and do not continue Assessment. Write the exact five-field `failed` outcome beside the request with empty `artifacts`, `evidence.artifactValidation: "not_run"`, `needsInput: null`, and a sanitized `error` containing exactly non-empty `code`, non-empty `message`, and boolean `retryable`, then invoke `publish` exactly once.
 
 4. Use the resulting `<workspacePath>/.github/modernize/.runtime/assessment/assess-cli.mjs` and load the `assessment` skill in `batch-headless` mode.
+  - Pass `request.decisions` as the skill's explicit `config`. The optional `targetRuntime`, `targetComputeServices`, `enableContainerization`, `targetOS`, `minimumCveSeverity`, and `cveScanScope` values must remain exact; never infer or replace an omitted value.
 5. Derive `<attempt-directory>` from the directory containing `request.json`. Run `prepare-run` with:
-   - the exact workspace and approved domains/coverage;
+  - the exact workspace and approved effective domains/coverage; omit `--domains` when `request.decisions.domains` is empty so JavaScript/TypeScript runs its dependency assessment;
+  - `--run-id <request.runId>` and `--language <request.language>`;
    - `--attempt-scratch-root <attempt-directory>/scratch`;
    - `--max-concurrency <request.decisions.maxConcurrency>`.
+  - When present, pass `--target-runtime`, comma-separated `--target-compute-services`, `--enable-containerization`, comma-separated `--target-os`, `--minimum-cve-severity`, and `--cve-scan-scope` to `prepare-run`.
 6. Execute only catalog-returned deterministic engines and skill tasks. Execute batches in order and partition each batch into catalog-order waves no larger than `maxConcurrency`. Wait for one wave before starting the next.
 7. Normalize every task result. Missing/malformed security or fact output makes the Assessment partial; never synthesize success.
 8. Generate and verify the existing versioned HTML and compatibility `report.json`. For full coverage, archive facts from `<attempt-directory>/scratch/engines/facts`.
@@ -90,6 +93,14 @@ Write only a compact `outcome.json` beside `request.json`. Its top level must co
 - Successful statuses use `error: null` and `needsInput: null`.
 
 Include absolute `artifacts.report` and `artifacts.html`; optional artifacts may link AppCAT and archived facts. Set `evidence.artifactValidation` to `passed` only after local verification.
+
+Serialize `outcome.json` with a platform JSON serializer. Never build it by concatenating JSON text, never append the two literal characters `\n`, and never use shell escaping as JSON encoding. On PowerShell, construct an object and pipe `ConvertTo-Json -Depth 10` to `Set-Content -Encoding utf8`. On POSIX, use `JSON.stringify` from Node. Before publishing, this exact byte file must pass a separate parse check:
+
+```powershell
+node -e "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'))" <outcome.json>
+```
+
+If the parse check fails, replace `outcome.json` once using the serializer and rerun the parse check. Never invoke `publish` with an unparsed outcome and never relax or work around its strict JSON parser.
 
 Publish exactly once:
 

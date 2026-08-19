@@ -4,6 +4,7 @@ description: |
   Executes a batch of implementation tasks with TDD workflow, source-anchored rewrite for behavioral fidelity, guideline-based code transformation, and full requirement tracing. Returns a structured batch report.
   Triggers: "implement tasks", "execute the batch", "write code for these tasks", "implement with source anchoring", "run the implementation".
   NOT for: task generation (use breaking-down-tasks), implementation planning (use creating-implementation-plan).
+user-invocable: false
 ---
 
 ## User Input

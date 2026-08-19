@@ -89,6 +89,12 @@ test("product invocation loads the real plugin and modernize agent", () => {
   assert.equal(acpArgs[acpArgs.indexOf("--model") + 1], "auto");
   assert.equal(acpArgs.includes("--prompt"), false);
   assert.equal(acpArgs.includes("--acp"), true);
+  assert.equal(acpArgs.includes("--allow-all-tools"), true);
+  const permissionProbeArgs = productAcpInvocationArgs({
+    workspacePath: path.resolve("workspace"),
+    allowAllTools: false,
+  });
+  assert.equal(permissionProbeArgs.includes("--allow-all-tools"), false);
   const acpEnvironment = productAcpEnvironment({ PATH: "probe-path" });
   assert.equal(acpEnvironment.PATH, "probe-path");
   assert.equal(acpEnvironment.PLUGIN_ROOT, pluginRoot);
@@ -115,6 +121,30 @@ test("ACP form responses select Start batch from structured choices", () => {
   );
 });
 
+test("ACP form responses select Batch or Single workspace mode exactly", () => {
+  const params = {
+    mode: "form",
+    requestedSchema: {
+      type: "object",
+      properties: {
+        workspaceMode: {
+          type: "string",
+          enum: ["Process repositories from repos.json", "Only process the current repository"],
+        },
+      },
+      required: ["workspaceMode"],
+    },
+  };
+  assert.deepEqual(acceptFormElicitation(params, "Process repositories from repos.json"), {
+    action: "accept",
+    content: { workspaceMode: "Process repositories from repos.json" },
+  });
+  assert.deepEqual(acceptFormElicitation(params, "Only process the current repository"), {
+    action: "accept",
+    content: { workspaceMode: "Only process the current repository" },
+  });
+});
+
 test("product fixtures contain two clean whole repositories and detect source changes", (t) => {
   const root = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "batch-product-fixture-test-")), "launch");
   t.after(() => fs.rmSync(path.dirname(root), { recursive: true, force: true }));
@@ -134,8 +164,11 @@ test("bootstrap failure fixture uses a repository condition instead of productio
   t.after(() => fs.rmSync(path.dirname(root), { recursive: true, force: true }));
   const fixture = createProductFixture(root, { bootstrapFailureRepository: "alpha-service" });
   assert.equal(fixture.variant, "bootstrap-failure");
-  assert.equal(fs.statSync(path.join(fixture.repositories[0].path, ".github")).isFile(), true);
-  assert.equal(Object.hasOwn(fixture.canaries, "alpha-service/.github"), true);
+  assert.equal(
+    fs.statSync(path.join(fixture.repositories[0].path, ".github", "modernize", ".runtime")).isFile(),
+    true,
+  );
+  assert.equal(Object.hasOwn(fixture.canaries, "alpha-service/.github/modernize/.runtime"), true);
   assert.deepEqual(verifySourceCanaries(fixture).changed, []);
 });
 

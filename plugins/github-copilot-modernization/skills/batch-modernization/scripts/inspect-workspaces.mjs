@@ -115,7 +115,7 @@ export function detectProjectLanguages(workspacePath) {
 
 export function redactSecrets(value) {
   return String(value ?? "")
-    .replace(/(?:https|ssh):\/\/[^\s'"<>]+/gi, (match) => {
+    .replace(/(?:https?|ssh):\/\/[^\s'"<>]+/gi, (match) => {
       try {
         return sanitizeGitUrl(match.replace(/[),.;]+$/, ""));
       } catch {

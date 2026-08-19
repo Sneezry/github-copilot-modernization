@@ -8,6 +8,8 @@ import {
   classifyProductHostBlocker,
   createPermissionDenialController,
   finalProductProbeStatus,
+  inheritedUnsupportedProbe,
+  reusableProbe,
 } from "./product-scenario-runner.mjs";
 import { validateProductPackage } from "./product-probe.mjs";
 
@@ -21,10 +23,11 @@ const evidencePath = path.join(
 function probes(status = "passed") {
   return {
     explicitBatchSuccess: { status },
+    defaultConfigBatchSelection: { status },
+    defaultConfigSingleSelection: { status },
     cancelBeforeApproval: { status },
     unsupportedBatchPlanning: { status },
     unsupportedBatchExecution: { status },
-    ambiguousSingleRepository: { status },
     naturalChildFailureContinuation: { status },
     missingResultContinuation: { status },
     partialAssessmentContinuation: { status },
@@ -34,8 +37,8 @@ function probes(status = "passed") {
 function failureMatrix(status = "passed") {
   return {
     childFailure: { productHostStatus: status },
-    missingResult: { productHostStatus: status },
-    partialAssessment: { productHostStatus: status },
+    missingResult: { productHostStatus: status, controlPlaneStatus: "passed" },
+    partialAssessment: { productHostStatus: status, controlPlaneStatus: "passed" },
   };
 }
 
@@ -43,6 +46,8 @@ test("product host failures use stable external blocker codes", () => {
   assert.equal(classifyProductHostBlocker(["exceeded your monthly quota"]), "copilot_quota_exhausted");
   assert.equal(classifyProductHostBlocker(["HTTP status 402"]), "copilot_quota_exhausted");
   assert.equal(classifyProductHostBlocker(["authentication failed"]), "copilot_authentication_failed");
+  assert.equal(classifyProductHostBlocker(["ACP session/new failed: Authentication required"], { fallback: false }), "copilot_authentication_failed");
+  assert.equal(classifyProductHostBlocker(["ordinary product assertion"], { fallback: false }), null);
   assert.equal(classifyProductHostBlocker(["model gpt-test is unavailable"]), "copilot_model_unavailable");
   assert.equal(classifyProductHostBlocker([]), null);
 });
@@ -82,6 +87,14 @@ test("probe status never reports passed while product-host matrix gaps remain", 
 });
 
 test("host blockers and product failures remain distinguishable", () => {
+  const diagnostics = probes();
+  diagnostics.missingResultContinuation = { status: "not_supported" };
+  diagnostics.partialAssessmentContinuation = { status: "not_supported" };
+  const diagnosticMatrix = failureMatrix();
+  diagnosticMatrix.missingResult.productHostStatus = "not_run";
+  diagnosticMatrix.partialAssessment.productHostStatus = "not_run";
+  assert.equal(finalProductProbeStatus(diagnostics, diagnosticMatrix), "passed");
+
   const blocked = probes();
   blocked.explicitBatchSuccess.status = "blocked";
   assert.equal(finalProductProbeStatus(blocked, failureMatrix()), "blocked");
@@ -91,7 +104,7 @@ test("host blockers and product failures remain distinguishable", () => {
   assert.equal(finalProductProbeStatus(failed, failureMatrix()), "failed");
 });
 
-test("unsupported host probes keep the matrix incomplete instead of failed", () => {
+test("unsupported natural child failure keeps the matrix incomplete", () => {
   const matrixProbes = probes();
   matrixProbes.naturalChildFailureContinuation = { status: "not_supported" };
   matrixProbes.missingResultContinuation = { status: "not_supported" };
@@ -130,4 +143,31 @@ test("recorded product-host evidence matches the current package and verdict rul
     assert.equal(Object.values(evidence.probes).some((probe) => probe.status === "blocked"), true);
     assert.match(evidence.probes.explicitBatchSuccess.host.sessionId, /^[A-Fa-f0-9-]{36}$/);
   }
+});
+
+test("partial Assessment reuses an unavailable ACP permission capability result", () => {
+  assert.deepEqual(inheritedUnsupportedProbe("partialAssessmentContinuation", {
+    missingResultContinuation: {
+      status: "not_supported",
+      code: "acp_permission_events_unavailable",
+    },
+  }), {
+    status: "not_supported",
+    code: "acp_permission_events_unavailable",
+    reason: "The same ACP host emitted no permission events during the missing-result capability probe",
+    inheritedFrom: "missingResultContinuation",
+  });
+  assert.equal(inheritedUnsupportedProbe("partialAssessmentContinuation", {
+    missingResultContinuation: { status: "passed" },
+  }), null);
+});
+
+test("resume reuses only passed scenarios and unavailable permission diagnostics", () => {
+  assert.equal(reusableProbe("explicitBatchSuccess", { status: "passed" }), true);
+  assert.equal(reusableProbe("explicitBatchSuccess", { status: "not_supported" }), false);
+  assert.equal(reusableProbe("missingResultContinuation", {
+    status: "not_supported",
+    code: "acp_permission_events_unavailable",
+  }), true);
+  assert.equal(reusableProbe("missingResultContinuation", { status: "failed" }), false);
 });

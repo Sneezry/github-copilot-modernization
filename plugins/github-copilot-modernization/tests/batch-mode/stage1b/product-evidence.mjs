@@ -2,6 +2,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import { directoryDigest } from "../../../skills/batch-modernization/scripts/batch-assessment-report.mjs";
+
 const TERMINAL_BATCH_STATUSES = new Set(["completed", "completed_with_issues", "failed"]);
 const SUCCESS_UNIT_STATUSES = new Set(["completed", "completed_with_issues"]);
 const TERMINAL_UNIT_STATUSES = new Set([
@@ -12,6 +14,23 @@ const TERMINAL_UNIT_STATUSES = new Set([
 ]);
 const UUID_PATTERN = /^[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[1-5][A-Fa-f0-9]{3}-[89ABab][A-Fa-f0-9]{3}-[A-Fa-f0-9]{12}$/;
 const PRODUCT_AGENT_PREFIX = "github-copilot-modernization:";
+const FACT_SKILL_IDS = [
+  "architecture-diagram",
+  "dependency-map",
+  "api-service-contracts",
+  "data-architecture",
+  "configuration-inventory",
+  "business-workflows",
+];
+const SECURITY_SKILL_IDS = [
+  "cve-known-vulnerabilities",
+  "cwe-code-quality",
+  "cwe-concurrency-synchronization",
+  "cwe-credentials-secrets",
+  "cwe-file-path-security",
+  "cwe-injection-attacks",
+  "cwe-memory-safety",
+];
 
 export class ProductEvidenceError extends Error {
   constructor(message) {
@@ -45,6 +64,10 @@ function readEvents(filePath) {
 
 function fileSha256(filePath) {
   return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+}
+
+function fileDigest(filePath) {
+  return `sha256:${fileSha256(filePath)}`;
 }
 
 function fileEvidence(filePath) {
@@ -117,12 +140,17 @@ function productAgentCalls(run, agentName) {
     .filter(({ toolCall }) => toolCallSelectsProductAgent(toolCall, agentName));
 }
 
-function acceptedChoice(run) {
+function completedProductAgentCalls(run, agentName) {
+  return productAgentCalls(run, agentName)
+    .filter(({ toolCall }) => toolCall.status === "completed");
+}
+
+function acceptedChoices(run) {
   const responses = run?.elicitationResponses ?? [];
-  requireEvidence(responses.length === 1, `Expected one structured approval response, found ${responses.length}`);
-  const response = responses[0]?.response;
-  requireEvidence(response?.action === "accept", "Structured approval response was not accepted");
-  return Object.values(response.content ?? {}).map(String).join(" ");
+  return responses.map(({ response }, index) => {
+    requireEvidence(response?.action === "accept", `Structured response ${index + 1} was not accepted`);
+    return Object.values(response.content ?? {}).map(String).join(" ");
+  });
 }
 
 function validateHostRun(run) {
@@ -138,28 +166,44 @@ function validateHostRun(run) {
   );
 }
 
-function validateStartApproval(run, approvalMode) {
+function validateStartApproval(run, approvalMode, scopeMode) {
   if (approvalMode === "structured") {
-    requireEvidence(/start/i.test(acceptedChoice(run)), "Structured response did not select Start batch");
+    const choices = acceptedChoices(run);
+    requireEvidence(choices.some((choice) => /start batch/i.test(choice)), "Structured response did not select Start batch");
+    if (scopeMode === "default-config") {
+      requireEvidence(
+        choices.some((choice) => /process repositories from repos\.json/i.test(choice)),
+        "Structured response did not select configured repositories",
+      );
+    }
   } else if (approvalMode === "explicit-follow-up") {
     requireEvidence((run.elicitationRequests ?? []).length === 0, "Explicit follow-up mode received an elicitation request");
     requireEvidence((run.elicitationResponses ?? []).length === 0, "Explicit follow-up mode received an elicitation response");
-    requireEvidence(run.userPrompts?.length === 2, `Expected two explicit user turns, found ${run.userPrompts?.length ?? 0}`);
-    requireEvidence(run.promptResults?.length === 2, `Expected two ACP prompt results, found ${run.promptResults?.length ?? 0}`);
+    const expectedTurns = scopeMode === "default-config" ? 3 : 2;
+    requireEvidence(run.userPrompts?.length === expectedTurns, `Expected ${expectedTurns} explicit user turns, found ${run.userPrompts?.length ?? 0}`);
+    requireEvidence(run.promptResults?.length === expectedTurns, `Expected ${expectedTurns} ACP prompt results, found ${run.promptResults?.length ?? 0}`);
     requireEvidence(run.userPrompts[0] !== "Start batch", "Initial Review request was itself Start batch");
-    requireEvidence(run.userPrompts[1] === "Start batch", "Second user turn was not exactly Start batch");
+    if (scopeMode === "default-config") {
+      requireEvidence(
+        run.userPrompts[1] === "Process repositories from repos.json",
+        "Second user turn did not select configured repositories exactly",
+      );
+    }
+    requireEvidence(run.userPrompts.at(-1) === "Start batch", "Final user turn was not exactly Start batch");
   } else {
     throw new ProductEvidenceError(`Unsupported approval evidence mode: ${approvalMode}`);
   }
   return {
     mode: approvalMode,
+    scopeMode,
     userPrompts: [...(run.userPrompts ?? [])],
     promptStopReasons: (run.promptResults ?? [run.promptResult]).filter(Boolean).map((result) => result.stopReason),
     elicitationCount: run.elicitationRequests?.length ?? 0,
   };
 }
 
-function validateProductAgentOrder(run, repositoryCount, approvalMode) {
+function validateProductAgentOrder(run, repositoryCount, approvalMode, scopeMode) {
+  const probeCalls = completedProductAgentCalls(run, "batch-mode-probe");
   const reviewCalls = productAgentCalls(run, "batch-review");
   const coordinatorCalls = productAgentCalls(run, "batch-coordinator");
   const assessmentCalls = productAgentCalls(run, "batch-assessment");
@@ -169,15 +213,16 @@ function validateProductAgentOrder(run, repositoryCount, approvalMode) {
     assessmentCalls.length === repositoryCount,
     `Expected ${repositoryCount} exact batch-assessment agent calls, found ${assessmentCalls.length}`,
   );
+  requireEvidence(
+    probeCalls.length === 1,
+    `Expected one exact batch-mode-probe call, found ${probeCalls.length}`,
+  );
+  requireEvidence(probeCalls[0].index < reviewCalls[0].index, "batch-review ran before the mandatory config probe");
   requireEvidence(reviewCalls[0].index < coordinatorCalls[0].index, "batch-coordinator ran before batch-review");
-  if (approvalMode === "explicit-follow-up") {
-    requireEvidence(reviewCalls[0].toolCall.promptIndex === 0, "batch-review did not run in the first user turn");
-    requireEvidence(coordinatorCalls[0].toolCall.promptIndex === 1, "batch-coordinator did not run after explicit approval");
-    requireEvidence(
-      assessmentCalls.every(({ toolCall }) => toolCall.promptIndex === 1),
-      "A batch-assessment call did not run after explicit approval",
-    );
-  }
+  requireEvidence(
+    assessmentCalls.every(({ index }) => coordinatorCalls[0].index < index),
+    "A batch-assessment call ran before batch-coordinator",
+  );
 }
 
 function canaryPath(fixture, canaryName) {
@@ -227,7 +272,9 @@ export function listBatchRoots(launchRoot) {
 
 export function discoverNewBatchRoot(launchRoot, previousRoots = []) {
   const previous = new Set(previousRoots.map((entry) => path.resolve(entry)));
-  const created = listBatchRoots(launchRoot).filter((entry) => !previous.has(path.resolve(entry)));
+  const created = listBatchRoots(launchRoot).filter((entry) =>
+    !previous.has(path.resolve(entry))
+    && fs.statSync(path.join(entry, "review.json"), { throwIfNoEntry: false })?.isFile());
   requireEvidence(created.length === 1, `Expected one new batch root, found ${created.length}`);
   return created[0];
 }
@@ -250,6 +297,8 @@ function validateReviewRoot(fixture, batchRoot) {
   const review = readJson(path.join(batchRoot, "review.json"), "batch review");
   requireEvidence(review.status === "ready_for_approval", "Review was not ready for approval");
   requireEvidence(review.batchRoot === path.resolve(batchRoot), "Review batchRoot does not match its directory");
+  requireEvidence(path.isAbsolute(review.batchAttemptScriptPath ?? ""), "Review batchAttemptScriptPath is not absolute");
+  requireEvidence(fs.statSync(review.batchAttemptScriptPath, { throwIfNoEntry: false })?.isFile(), "Review batchAttemptScriptPath is missing");
   requireEvidence(review.configSha256 && /^[a-f0-9]{64}$/.test(review.configSha256), "Review config digest is invalid");
   requireEvidence(
     review.selectedExecutionUnitIds?.length === fixture.repositories.length,
@@ -258,26 +307,52 @@ function validateReviewRoot(fixture, batchRoot) {
   return review;
 }
 
-export function validateCancelledProductRun({ fixture, batchRoot, acpRun, approvalMode = "structured" } = {}) {
+export function validateCancelledProductRun({
+  fixture,
+  batchRoot,
+  acpRun,
+  approvalMode = "structured",
+  scopeMode = "explicit",
+} = {}) {
   validateHostRun(acpRun);
   if (approvalMode === "structured") {
-    requireEvidence(/cancel/i.test(acceptedChoice(acpRun)), "Structured response did not select Cancel");
+    const choices = acceptedChoices(acpRun);
+    requireEvidence(choices.some((choice) => /cancel/i.test(choice)), "Structured response did not select Cancel");
+    if (scopeMode === "default-config") {
+      requireEvidence(
+        choices.some((choice) => /process repositories from repos\.json/i.test(choice)),
+        "Structured response did not select configured repositories before Cancel",
+      );
+    }
   } else if (approvalMode === "explicit-follow-up") {
     requireEvidence((acpRun.elicitationRequests ?? []).length === 0, "Explicit Cancel received an elicitation request");
     requireEvidence((acpRun.elicitationResponses ?? []).length === 0, "Explicit Cancel received an elicitation response");
-    requireEvidence(acpRun.userPrompts?.length === 2, `Expected two explicit Cancel turns, found ${acpRun.userPrompts?.length ?? 0}`);
-    requireEvidence(acpRun.promptResults?.length === 2, `Expected two explicit Cancel results, found ${acpRun.promptResults?.length ?? 0}`);
+    const expectedTurns = scopeMode === "default-config" ? 3 : 2;
+    requireEvidence(acpRun.userPrompts?.length === expectedTurns, `Expected ${expectedTurns} explicit Cancel turns, found ${acpRun.userPrompts?.length ?? 0}`);
+    requireEvidence(acpRun.promptResults?.length === expectedTurns, `Expected ${expectedTurns} explicit Cancel results, found ${acpRun.promptResults?.length ?? 0}`);
     requireEvidence(acpRun.userPrompts[0] !== "Cancel", "Initial Review request was itself Cancel");
-    requireEvidence(acpRun.userPrompts[1] === "Cancel", "Second user turn was not exactly Cancel");
+    if (scopeMode === "default-config") {
+      requireEvidence(acpRun.userPrompts[1] === "Process repositories from repos.json", "Second user turn did not select configured repositories exactly");
+    }
+    requireEvidence(acpRun.userPrompts.at(-1) === "Cancel", "Final user turn was not exactly Cancel");
   } else {
     throw new ProductEvidenceError(`Unsupported cancel approval mode: ${approvalMode}`);
   }
+  const probeCalls = completedProductAgentCalls(acpRun, "batch-mode-probe");
   const reviewCalls = productAgentCalls(acpRun, "batch-review");
   const coordinatorCalls = productAgentCalls(acpRun, "batch-coordinator");
+  requireEvidence(
+    probeCalls.length === (scopeMode === "default-config" ? 1 : 0),
+    `Expected ${scopeMode === "default-config" ? 1 : 0} exact batch-mode-probe calls, found ${probeCalls.length}`,
+  );
   requireEvidence(reviewCalls.length === 1, `Expected one exact batch-review call, found ${reviewCalls.length}`);
   requireEvidence(coordinatorCalls.length === 0, "Cancel unexpectedly invoked batch-coordinator");
-  if (approvalMode === "explicit-follow-up") {
-    requireEvidence(reviewCalls[0].toolCall.promptIndex === 0, "Cancel Review did not run in the first user turn");
+  if (scopeMode === "default-config") {
+    const orderedCalls = (acpRun.toolCalls ?? []);
+    requireEvidence(
+      orderedCalls.indexOf(probeCalls[0].toolCall) < orderedCalls.indexOf(reviewCalls[0].toolCall),
+      "Cancel Review ran before scope selection",
+    );
   }
   const review = validateReviewRoot(fixture, path.resolve(batchRoot));
   const forbidden = [
@@ -291,6 +366,7 @@ export function validateCancelledProductRun({ fixture, batchRoot, acpRun, approv
     "repos",
     "summary.json",
     "summary.md",
+    "finalization.json",
   ];
   const unexpected = forbidden.filter((relativePath) => fs.existsSync(path.join(batchRoot, relativePath)));
   requireEvidence(unexpected.length === 0, `Cancel left approval-bearing artifacts: ${unexpected.join(", ")}`);
@@ -301,6 +377,7 @@ export function validateCancelledProductRun({ fixture, batchRoot, acpRun, approv
     batchId: review.batchId,
     batchRoot: path.resolve(batchRoot),
     approvalMode,
+    scopeMode,
     elicitationCount: acpRun.elicitationRequests?.length ?? 0,
     sourceCanaries: canaries,
     review: fileEvidence(path.join(batchRoot, "review.json")),
@@ -315,6 +392,7 @@ function requireControlFiles(batchRoot) {
     "events.jsonl",
     "summary.json",
     "summary.md",
+    "finalization.json",
   ]) {
     requireEvidence(
       fs.statSync(path.join(batchRoot, relativePath), { throwIfNoEntry: false })?.isFile(),
@@ -345,24 +423,207 @@ function expectedSummaryCounts(units) {
   };
 }
 
-function validateResultArtifacts(result, batchRoot, workspacePath) {
+function sameStringSet(actual, expected) {
+  if (!Array.isArray(actual) || !Array.isArray(expected)) return false;
+  return JSON.stringify([...new Set(actual)].sort()) === JSON.stringify([...new Set(expected)].sort());
+}
+
+function sameJson(actual, expected) {
+  return JSON.stringify(actual) === JSON.stringify(expected);
+}
+
+function reportPayload(htmlPath) {
+  const html = fs.readFileSync(htmlPath, "utf8");
+  const match = html.match(/<script type=["']application\/json["'] id=["']report-data["']>([\s\S]*?)<\/script>/i);
+  requireEvidence(match, `Published HTML has no report-data payload: ${htmlPath}`);
+  try {
+    return JSON.parse(match[1]);
+  } catch (error) {
+    throw new ProductEvidenceError(`Published HTML report-data is malformed: ${error.message}`);
+  }
+}
+
+function validatePublishedReport({ fixture, state, summary, finalization, attempts }) {
+  const expectedParent = path.join(fixture.launchRoot, ".github", "modernize", "assessment");
+  const reportRoot = path.resolve(finalization.reportDirectoryPath ?? "");
+  const indexPath = path.resolve(finalization.reportIndexPath ?? "");
+  const aggregatePath = path.resolve(finalization.aggregateReportPath ?? "");
+  requireEvidence(path.dirname(reportRoot) === path.resolve(expectedParent), "Published report is outside the launch-root assessment directory");
+  requireEvidence(/^reports-\d{14}$/.test(path.basename(reportRoot)), "Published report directory does not use the shared reports-timestamp convention");
+  requireEvidence(indexPath === path.join(reportRoot, "index.html"), "Published report index path is not canonical");
+  requireEvidence(aggregatePath === path.join(reportRoot, "aggregate-report.json"), "Published aggregate path is not canonical");
+  requireEvidence(fs.statSync(indexPath, { throwIfNoEntry: false })?.isFile(), "Published report index is missing");
+  requireEvidence(fs.statSync(aggregatePath, { throwIfNoEntry: false })?.isFile(), "Published aggregate report is missing");
+  requireEvidence(directoryDigest(reportRoot) === finalization.reportDirectoryDigest, "Finalization report directory digest mismatch");
+  requireEvidence(fileDigest(indexPath) === finalization.reportIndexDigest, "Finalization report index digest mismatch");
+  requireEvidence(fileDigest(aggregatePath) === finalization.aggregateReportDigest, "Finalization aggregate report digest mismatch");
+  requireEvidence(summary.reports?.directory === reportRoot, "Summary report directory mismatch");
+  requireEvidence(summary.reports?.index === indexPath, "Summary report index mismatch");
+  requireEvidence(summary.reports?.aggregate === aggregatePath, "Summary aggregate report mismatch");
+  requireEvidence(summary.reports?.digest === finalization.reportDirectoryDigest, "Summary report digest mismatch");
+  const aggregate = readJson(aggregatePath, "published aggregate report");
+  requireEvidence(aggregate.producer === "GitHub Copilot Modernization Plugin", "Aggregate producer mismatch");
+  requireEvidence(aggregate.platform === "copilot-cli-plugin", "Aggregate platform mismatch");
+  requireEvidence(aggregate.metadata?.batchId === state.batchId, "Aggregate batch identity mismatch");
+  requireEvidence(aggregate.metadata?.status === state.status, "Aggregate status mismatch");
+  requireEvidence(Array.isArray(aggregate.projects), "Aggregate projects are missing");
+  requireEvidence(aggregate.rules && typeof aggregate.rules === "object", "Aggregate rules are missing");
+  const extension = aggregate.extensions?.["github-copilot-modernization"];
+  requireEvidence(extension?.schema === "github-copilot-modernization/batch-assessment/v1", "Plugin aggregate extension is missing");
+  requireEvidence(extension.batchId === state.batchId, "Aggregate extension batch identity mismatch");
+  requireEvidence(extension.status === state.status, "Aggregate extension status mismatch");
+  requireEvidence(extension.counts?.total === attempts.length, "Aggregate repository count mismatch");
+  requireEvidence(extension.counts?.completed === summary.counts.completed, "Aggregate completed count mismatch");
+  requireEvidence(extension.counts?.completedWithIssues === summary.counts.completedWithIssues, "Aggregate issue count mismatch");
+  requireEvidence(extension.counts?.failed === summary.counts.failed, "Aggregate failed count mismatch");
+  const expectedBySeverity = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+  const expectedByState = {};
+  const expectedTopRecommendations = [];
+  const expectedPlanningSupported = { supported: 0, unsupported: 0, unavailable: 0 };
+  const repositoryReports = new Map((extension.repositories ?? []).map((repository) => [repository.executionUnitId, repository]));
+  for (const attempt of attempts) {
+    const repository = repositoryReports.get(attempt.executionUnitId);
+    requireEvidence(repository, `Aggregate is missing ${attempt.executionUnitId}`);
+    requireEvidence(repository.status === attempt.status, `${attempt.executionUnitId} aggregate status mismatch`);
+    if (SUCCESS_UNIT_STATUSES.has(attempt.status)) {
+      requireEvidence(repository.reports, `${attempt.executionUnitId} has no published report snapshot`);
+      for (const [field, artifactName] of [["json", "report"], ["html", "html"]]) {
+        const publishedPath = path.resolve(reportRoot, repository.reports[field]);
+        requireEvidence(isPathInside(reportRoot, publishedPath), `${attempt.executionUnitId} published ${field} escapes the report root`);
+        requireEvidence(fs.statSync(publishedPath, { throwIfNoEntry: false })?.isFile(), `${attempt.executionUnitId} published ${field} is missing`);
+        const expectedDigest = `sha256:${attempt.artifacts[artifactName].sha256}`;
+        requireEvidence(fileDigest(publishedPath) === expectedDigest, `${attempt.executionUnitId} published ${field} differs from its canonical artifact`);
+        requireEvidence(repository.reports.digests[field] === expectedDigest, `${attempt.executionUnitId} published ${field} digest is not recorded`);
+      }
+      const payload = reportPayload(path.resolve(reportRoot, repository.reports.html));
+      const reportConfig = payload.intent?.assessment_config ?? {};
+      requireEvidence(sameJson(repository.assessmentConfig, reportConfig), `${attempt.executionUnitId} assessment config mismatch`);
+      requireEvidence(sameJson(extension.assessmentConfig, reportConfig), "Aggregate assessment config mismatch");
+      requireEvidence(sameJson(repository.findings.bySeverity, payload.counts.by_severity), `${attempt.executionUnitId} severity counts mismatch`);
+      const sortedState = Object.fromEntries(Object.entries(payload.counts.by_state).sort(([left], [right]) => left.localeCompare(right)));
+      requireEvidence(sameJson(repository.findings.byState, sortedState), `${attempt.executionUnitId} state counts mismatch`);
+      for (const [severity, count] of Object.entries(payload.counts.by_severity)) {
+        expectedBySeverity[severity] += count;
+      }
+      for (const [stateName, count] of Object.entries(payload.counts.by_state)) {
+        expectedByState[stateName] = (expectedByState[stateName] ?? 0) + count;
+      }
+      const recommendation = {
+        kind: payload.top_recommendation.kind,
+        summary: payload.top_recommendation.summary,
+        nextAction: payload.top_recommendation.next_action,
+        prefilledPrompt: payload.top_recommendation.prefilled_prompt,
+      };
+      requireEvidence(sameJson(repository.topRecommendation, recommendation), `${attempt.executionUnitId} top recommendation mismatch`);
+      expectedTopRecommendations.push({ identity: repository.identity, ...recommendation });
+      const expectedPlanning = repository.language === "java" || repository.language === "dotnet";
+      requireEvidence(repository.planningSupported === expectedPlanning, `${attempt.executionUnitId} planning support mismatch`);
+      expectedPlanningSupported[expectedPlanning ? "supported" : "unsupported"] += 1;
+    } else {
+      requireEvidence(repository.reports === null, `${attempt.executionUnitId} failure unexpectedly has a report snapshot`);
+      requireEvidence(repository.assessmentConfig === null, `${attempt.executionUnitId} failure has assessment config evidence`);
+      requireEvidence(repository.topRecommendation === null, `${attempt.executionUnitId} failure has a top recommendation`);
+      requireEvidence(repository.planningSupported === null, `${attempt.executionUnitId} failure has planning support evidence`);
+      expectedPlanningSupported.unavailable += 1;
+    }
+  }
+  const sortedExpectedState = Object.fromEntries(Object.entries(expectedByState).sort(([left], [right]) => left.localeCompare(right)));
+  requireEvidence(sameJson(extension.counts.bySeverity, expectedBySeverity), "Aggregate severity counts mismatch");
+  requireEvidence(sameJson(extension.counts.byState, sortedExpectedState), "Aggregate state counts mismatch");
+  requireEvidence(sameJson(extension.topRecommendations, expectedTopRecommendations), "Aggregate top recommendations mismatch");
+  requireEvidence(sameJson(extension.planningSupported, expectedPlanningSupported), "Aggregate planning support mismatch");
+  requireEvidence(sameJson(summary.findings?.bySeverity, expectedBySeverity), "Summary severity counts mismatch");
+  requireEvidence(sameJson(summary.findings?.byState, sortedExpectedState), "Summary state counts mismatch");
+  requireEvidence(sameJson(summary.topRecommendations, expectedTopRecommendations), "Summary top recommendations mismatch");
+  requireEvidence(sameJson(summary.planningSupported, expectedPlanningSupported), "Summary planning support mismatch");
+  return {
+    directory: { path: reportRoot, digest: finalization.reportDirectoryDigest },
+    index: fileEvidence(indexPath),
+    aggregate: fileEvidence(aggregatePath),
+  };
+}
+
+function validateResultArtifacts(result, batchRoot, workspacePath, request) {
   const artifacts = {};
-  for (const [name, artifactPath] of Object.entries(result.artifacts ?? {})) {
+  const canonicalRoots = [batchRoot, workspacePath].map((root) => fs.realpathSync.native(root));
+  const addArtifact = (name, artifactPath) => {
     requireEvidence(path.isAbsolute(artifactPath), `Result artifact ${name} is not absolute`);
+    requireEvidence(fs.statSync(artifactPath, { throwIfNoEntry: false })?.isFile(), `Result artifact ${name} is missing`);
+    const canonicalArtifact = fs.realpathSync.native(artifactPath);
     requireEvidence(
-      isPathInside(batchRoot, artifactPath) || isPathInside(workspacePath, artifactPath),
+      canonicalRoots.some((root) => isPathInside(root, canonicalArtifact)),
       `Result artifact ${name} escapes the attempt roots`,
     );
-    requireEvidence(fs.statSync(artifactPath, { throwIfNoEntry: false })?.isFile(), `Result artifact ${name} is missing`);
-    artifacts[name] = fileEvidence(artifactPath);
+    artifacts[name] = fileEvidence(canonicalArtifact);
+  };
+  for (const [name, artifactPath] of Object.entries(result.artifacts ?? {})) {
+    addArtifact(name, artifactPath);
   }
   if (SUCCESS_UNIT_STATUSES.has(result.status)) {
     requireEvidence(result.evidence?.artifactValidation === "passed", "Successful result lacks passed artifact validation");
     requireEvidence(artifacts.report, "Successful Assessment has no report artifact");
     requireEvidence(artifacts.html, "Successful Assessment has no HTML artifact");
     const report = readJson(artifacts.report.path, "Assessment report");
-    requireEvidence(report && typeof report === "object" && !Array.isArray(report), "Assessment report is not an object");
-    requireEvidence(artifacts.html.bytes > 0, "Assessment HTML artifact is empty");
+    requireEvidence(report.version === "1.1.0", "Assessment report has an unsupported version");
+    requireEvidence(report.metadata?.runId === request.runId, "Assessment report runId does not match request");
+    requireEvidence(report.metadata?.language === request.language, "Assessment report language does not match request");
+    requireEvidence(
+      sameStringSet(report.metadata?.domains, request.decisions?.domains),
+      "Assessment report domains do not match request",
+    );
+    for (const field of ["categories", "findings", "security"]) {
+      requireEvidence(Array.isArray(report[field]), `Assessment report ${field} is not an array`);
+    }
+    requireEvidence(report.metadata?.totalFindings === report.findings.length, "Assessment report finding count is inconsistent");
+    requireEvidence(artifacts.html.bytes > 10_000, "Assessment HTML artifact is incomplete");
+    const html = fs.readFileSync(artifacts.html.path, "utf8");
+    const payloadMatch = html.match(/<script type=["']application\/json["'] id=["']report-data["']>([\s\S]*?)<\/script>/i);
+    requireEvidence(payloadMatch, "Assessment HTML has no report-data payload");
+    let payload;
+    try {
+      payload = JSON.parse(payloadMatch[1]);
+    } catch (error) {
+      throw new ProductEvidenceError(`Assessment HTML report-data is invalid: ${error.message}`);
+    }
+    requireEvidence(payload.meta?.run_id === request.runId, "Assessment HTML run_id does not match request");
+    if (request.decisions?.analysisCoverage === "full") {
+      for (const skillId of FACT_SKILL_IDS) {
+        addArtifact(`fact:${skillId}`, path.join(path.dirname(artifacts.report.path), "facts", `${skillId}.md`));
+      }
+    }
+    if (request.decisions?.domains?.includes("security")) {
+      const securityRoot = path.join(
+        path.dirname(request.resultPath),
+        "scratch",
+        "engines",
+        "security",
+        "incoming",
+      );
+      for (const skillId of SECURITY_SKILL_IDS) {
+        addArtifact(`security:${skillId}`, path.join(securityRoot, `${skillId}.json`));
+      }
+    }
+    if (["java", "dotnet"].includes(request.language)
+        && request.decisions?.domains?.some((domain) => domain !== "security")) {
+      if (!artifacts.appcat) {
+        const defaultAppcatPath = path.join(
+          workspacePath,
+          ".github",
+          "modernize",
+          ".memory",
+          "runs",
+          request.runId,
+          "appcat",
+          "report.json",
+        );
+        if (fs.statSync(defaultAppcatPath, { throwIfNoEntry: false })?.isFile()) {
+          addArtifact("appcat", defaultAppcatPath);
+        }
+      }
+      requireEvidence(artifacts.appcat, "AppCAT Assessment has no AppCAT artifact");
+      const appcat = readJson(artifacts.appcat.path, "AppCAT report");
+      requireEvidence(appcat && typeof appcat === "object" && !Array.isArray(appcat), "AppCAT report is not an object");
+    }
   }
   return artifacts;
 }
@@ -418,6 +679,13 @@ function validateAttempt({ fixture, batchRoot, batchId, unit, events, summaryRes
   })) {
     requireEvidence(request[field] === expected, `${unit.executionUnitId} request ${field} mismatch`);
   }
+  requireEvidence(request.runId === `batch-${unit.invocationId.toLowerCase()}`, `${unit.executionUnitId} request runId mismatch`);
+  requireEvidence(path.isAbsolute(request.assessmentCliPath ?? ""), `${unit.executionUnitId} request assessmentCliPath is not absolute`);
+  requireEvidence(fs.statSync(request.assessmentCliPath, { throwIfNoEntry: false })?.isFile(), `${unit.executionUnitId} request assessmentCliPath is missing`);
+  requireEvidence(
+    ["java", "dotnet", "javascript", "typescript"].includes(request.language),
+    `${unit.executionUnitId} request language is unsupported`,
+  );
   matchingFixtureRepository(fixture, request.workspacePath);
   requireEvidence(unit.resultPath === resultPath, `${unit.executionUnitId} state resultPath mismatch`);
 
@@ -438,7 +706,7 @@ function validateAttempt({ fixture, batchRoot, batchId, unit, events, summaryRes
     const committedStatus = result.status === "skipped" ? "failed" : result.status;
     requireEvidence(unit.status === committedStatus, `${unit.executionUnitId} result/state status mismatch`);
     requireEvidence(timestamp(result.completedAt, `${unit.executionUnitId} completedAt`) <= finishedAt, `${unit.executionUnitId} result postdates commit`);
-    artifacts = validateResultArtifacts(result, batchRoot, request.workspacePath);
+    artifacts = validateResultArtifacts(result, batchRoot, request.workspacePath, request);
   } else {
     requireEvidence(unit.status === "protocol_error", `${unit.executionUnitId} is missing a non-protocol-error result`);
   }
@@ -451,6 +719,32 @@ function validateAttempt({ fixture, batchRoot, batchId, unit, events, summaryRes
   const validation = repoState.validations?.[unit.executionUnitId];
   requireEvidence(validation, `${unit.executionUnitId} repository validation is missing`);
   requireEvidence(validation.status === (result?.status ?? "protocol_error"), `${unit.executionUnitId} repository validation status mismatch`);
+  const validationPath = path.join(path.dirname(requestPath), "validation.json");
+  const validationRecord = readJson(validationPath, `${unit.executionUnitId} validation record`);
+  for (const [field, expected] of Object.entries({
+    batchId,
+    invocationId: unit.invocationId,
+    repoId: unit.repoId,
+    executionUnitId: unit.executionUnitId,
+    phase: "assessment",
+    attempt: 1,
+    requestDigest: fileDigest(requestPath),
+    resultDigest: result ? fileDigest(resultPath) : null,
+  })) {
+    requireEvidence(validationRecord[field] === expected, `${unit.executionUnitId} validation ${field} mismatch`);
+  }
+  requireEvidence(validationRecord.status === validation.status, `${unit.executionUnitId} validation record status mismatch`);
+  requireEvidence(validationRecord.valid === validation.valid, `${unit.executionUnitId} validation record validity mismatch`);
+  requireEvidence(
+    JSON.stringify(validationRecord.artifacts) === JSON.stringify(validation.artifacts),
+    `${unit.executionUnitId} validation record artifacts mismatch`,
+  );
+  requireEvidence(
+    JSON.stringify(validationRecord.artifactDigests) === JSON.stringify(Object.fromEntries(
+      Object.entries(artifacts).map(([name, artifact]) => [name, `sha256:${artifact.sha256}`]),
+    )),
+    `${unit.executionUnitId} validation artifact digest mismatch`,
+  );
   requireEvidence(summaryResult?.status === unit.status, `${unit.executionUnitId} summary status mismatch`);
   for (const artifactName of Object.keys(artifacts)) {
     requireEvidence(
@@ -470,21 +764,29 @@ function validateAttempt({ fixture, batchRoot, batchId, unit, events, summaryRes
     finishSequence: finishedEvent.sequence,
     request: fileEvidence(requestPath),
     result: result ? fileEvidence(resultPath) : null,
+    validation: fileEvidence(validationPath),
     scratchPath: path.join(path.dirname(requestPath), "scratch"),
     artifacts,
   };
 }
 
-export function validateCompletedProductRun({ fixture, batchRoot, acpRun, approvalMode = "structured" } = {}) {
+export function validateCompletedProductRun({
+  fixture,
+  batchRoot,
+  acpRun,
+  approvalMode = "structured",
+  scopeMode = "explicit",
+} = {}) {
   validateHostRun(acpRun);
-  const approval = validateStartApproval(acpRun, approvalMode);
-  validateProductAgentOrder(acpRun, fixture.repositories.length, approvalMode);
+  const approval = validateStartApproval(acpRun, approvalMode, scopeMode);
+  validateProductAgentOrder(acpRun, fixture.repositories.length, approvalMode, scopeMode);
   const root = path.resolve(batchRoot);
   validateReviewRoot(fixture, root);
   requireControlFiles(root);
   const manifest = readJson(path.join(root, "manifest.json"), "batch manifest");
   const state = readJson(path.join(root, "state.json"), "batch state");
   const summary = readJson(path.join(root, "summary.json"), "batch summary");
+  const finalization = readJson(path.join(root, "finalization.json"), "Assessment finalization journal");
   const events = readEvents(path.join(root, "events.jsonl"));
   requireEvidence(manifest.batchId === state.batchId && state.batchId === summary.batchId, "Batch identity differs across control artifacts");
   requireEvidence(manifest.action === "assessment" && manifest.executionMode === "local", "Manifest is outside the Stage 1B boundary");
@@ -492,6 +794,11 @@ export function validateCompletedProductRun({ fixture, batchRoot, acpRun, approv
   requireEvidence(manifest.assessment?.decisions?.maxConcurrency === 1, "Manifest does not enforce maxConcurrency 1");
   requireEvidence(TERMINAL_BATCH_STATUSES.has(state.status), `Batch state is not terminal: ${state.status}`);
   requireEvidence(summary.status === state.status, "Summary status does not match state");
+  requireEvidence(finalization.batchId === state.batchId, "Finalization batch identity mismatch");
+  requireEvidence(finalization.status === state.status, "Finalization status does not match state");
+  requireEvidence(finalization.releaseReady === true && finalization.released === true, "Finalization did not release the lease");
+  requireEvidence(finalization.summaryJsonDigest === fileDigest(path.join(root, "summary.json")), "Finalization summary JSON digest mismatch");
+  requireEvidence(finalization.summaryMarkdownDigest === fileDigest(path.join(root, "summary.md")), "Finalization summary Markdown digest mismatch");
   requireEvidence(state.executionUnits?.length === fixture.repositories.length, "Batch state does not contain both fixture repositories");
   requireEvidence(
     manifest.selectedExecutionUnitIds?.length === state.executionUnits.length,
@@ -523,6 +830,7 @@ export function validateCompletedProductRun({ fixture, batchRoot, acpRun, approv
     JSON.stringify(summary.counts) === JSON.stringify(expectedSummaryCounts(state.executionUnits)),
     "Summary counts do not match terminal state",
   );
+  const userReport = validatePublishedReport({ fixture, state, summary, finalization, attempts });
   const canaries = verifyProductSourceCanaries(fixture);
   requireEvidence(canaries.valid, `Assessment changed source canaries: ${canaries.changed.join(", ")}`);
   return {
@@ -535,11 +843,13 @@ export function validateCompletedProductRun({ fixture, batchRoot, acpRun, approv
     sequential: true,
     sourceCanaries: canaries,
     attempts,
+    userReport,
     controlArtifacts: {
       manifest: fileEvidence(path.join(root, "manifest.json")),
       state: fileEvidence(path.join(root, "state.json")),
       events: fileEvidence(path.join(root, "events.jsonl")),
       summary: fileEvidence(path.join(root, "summary.json")),
+      finalization: fileEvidence(path.join(root, "finalization.json")),
     },
   };
 }

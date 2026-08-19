@@ -5,6 +5,7 @@ description: |
   Triggers: "check migration guidelines", "look up transformation rules", "find Struts-to-Spring patterns", "apply migration conventions", "conversion rules for X→Y".
   Also consumed automatically by planning and implementation skills during migration workflows.
   NOT for: direct execution — other skills scan this directory.
+user-invocable: false
 ---
 
 ## User Input

@@ -513,6 +513,24 @@ function positiveIntegerOption(options, name) {
   return parsed;
 }
 
+function booleanOption(options, name) {
+  if (options[name] === undefined) return undefined;
+  if (options[name] === "true") return true;
+  if (options[name] === "false") return false;
+  throw new Error(`--${name} must be true or false`);
+}
+
+function assessmentConfigOptions(options) {
+  return Object.fromEntries(Object.entries({
+    targetRuntime: options["target-runtime"],
+    targetComputeServices: splitOption(options["target-compute-services"]),
+    enableContainerization: booleanOption(options, "enable-containerization"),
+    targetOS: splitOption(options["target-os"]),
+    minimumCveSeverity: options["minimum-cve-severity"],
+    cveScanScope: options["cve-scan-scope"],
+  }).filter(([, value]) => value !== undefined));
+}
+
 function printResult(result) {
   console.log(JSON.stringify(result, null, 2));
 }
@@ -528,10 +546,12 @@ function bootstrapRuntime(workspacePath) {
     path.join(sourceDirectory, "templates", "report.html"),
     path.join(destination, "templates", "report.html"),
   );
-  const mappingSource = path.join(sourceDirectory, "solution-mapping.json");
-  if (fs.existsSync(mappingSource)) {
-    fs.copyFileSync(mappingSource, path.join(destination, "solution-mapping.json"));
-  }
+  const mappingSource = [
+    path.resolve(sourceDirectory, "..", "resources", "solution-mapping.json"),
+    path.join(sourceDirectory, "solution-mapping.json"),
+  ].find((candidate) => fs.existsSync(candidate));
+  if (!mappingSource) throw new Error("Assessment solution mapping is unavailable");
+  fs.copyFileSync(mappingSource, path.join(destination, "solution-mapping.json"));
   const atomicSource = path.join(sourceDirectory, "atomic");
   if (fs.existsSync(atomicSource)) {
     fs.cpSync(atomicSource, path.join(destination, "atomic"), { recursive: true, force: true });
@@ -586,6 +606,7 @@ export async function main(argv = process.argv.slice(2)) {
         analysisCoverage: options.coverage ?? "issue-only",
         attemptScratchRoot: options["attempt-scratch-root"],
         maxConcurrency: positiveIntegerOption(options, "max-concurrency"),
+        assessmentConfig: assessmentConfigOptions(options),
       }));
       return 0;
     }

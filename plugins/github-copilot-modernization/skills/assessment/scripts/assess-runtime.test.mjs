@@ -14,6 +14,7 @@ import {
   findFilesRecursively,
   getJavaAppcatArchive,
   parseNcuOutput,
+  resolveNpxInvocation,
 } from "./assess-runtime.mjs";
 
 const temporaryDirectories = [];
@@ -210,4 +211,27 @@ test("NCU arguments pin the requested tool version", () => {
     "--packageFile",
     "C:\\src\\package.json",
   ]);
+});
+
+test("Windows NCU invokes npx through the Node JavaScript entrypoint", () => {
+  const execPath = path.join("C:\\", "Node", "node.exe");
+  const npxCliPath = path.join("C:\\", "Node", "node_modules", "npm", "bin", "npx-cli.js");
+  const invocation = resolveNpxInvocation({
+    platform: "win32",
+    execPath,
+    env: {},
+    existsSync: (candidate) => candidate === npxCliPath,
+  });
+  assert.deepEqual(invocation, { command: execPath, prefixArgs: [npxCliPath] });
+  assert.throws(
+    () => resolveNpxInvocation({ platform: "win32", execPath, env: {}, existsSync: () => false }),
+    /Unable to locate npx-cli\.js/,
+  );
+});
+
+test("POSIX NCU uses npx directly", () => {
+  assert.deepEqual(
+    resolveNpxInvocation({ platform: "linux" }),
+    { command: "npx", prefixArgs: [] },
+  );
 });

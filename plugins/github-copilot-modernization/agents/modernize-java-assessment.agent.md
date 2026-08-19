@@ -1,7 +1,7 @@
 ---
 name: modernize-java-assessment
 description: 'Assess codebases with evidence-based findings'
-user-invocable: true
+user-invocable: false
 tools:
   - skill
   - agent

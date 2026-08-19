@@ -27,6 +27,20 @@ export const SECURITY_SKILL_IDS = Object.freeze([
 const SUPPORTED_DOMAINS = new Set(["security", "cloud-readiness", "java-upgrade"]);
 const SUPPORTED_COVERAGE = new Set(["issue-only", "full"]);
 
+export function defaultAssessmentDomains(language) {
+  switch (language) {
+    case "java":
+      return ["java-upgrade", "cloud-readiness"];
+    case "dotnet":
+      return ["cloud-readiness"];
+    case "javascript":
+    case "typescript":
+      return [];
+    default:
+      throw new Error(`Unsupported assessment language: ${language}`);
+  }
+}
+
 function normalizeDomains(domains) {
   return [...new Set((domains ?? []).filter((domain) => SUPPORTED_DOMAINS.has(domain)))];
 }
@@ -99,6 +113,22 @@ function yamlScalar(value) {
   return JSON.stringify(String(value));
 }
 
+function assessmentConfigLines(config = {}) {
+  const entries = Object.entries(config).filter(([, value]) => value !== undefined);
+  if (entries.length === 0) return [];
+  const lines = ["assessment_config:"];
+  for (const [name, value] of entries) {
+    if (Array.isArray(value)) {
+      lines.push(`  ${name}:`, ...value.map((entry) => `    - ${yamlScalar(entry)}`));
+    } else if (typeof value === "boolean") {
+      lines.push(`  ${name}: ${value}`);
+    } else {
+      lines.push(`  ${name}: ${yamlScalar(value)}`);
+    }
+  }
+  return lines;
+}
+
 function writeRunMetadata({ runDir, runId, language, plan }) {
   fs.mkdirSync(runDir, { recursive: true });
   const selectedSkills = plan.batches.flatMap((batch) => batch.tasks.map((entry) => entry.skillId));
@@ -109,6 +139,7 @@ function writeRunMetadata({ runDir, runId, language, plan }) {
     "selected_groups:",
     ...plan.domains.map((domain) => `  - ${yamlScalar(domain)}`),
     `analysis_coverage: ${yamlScalar(plan.analysisCoverage)}`,
+    ...assessmentConfigLines(plan.assessmentConfig),
     "",
   ].join("\n");
   const selected = [
@@ -129,6 +160,7 @@ export function prepareAssessmentRun({
   analysisCoverage = "issue-only",
   attemptScratchRoot,
   maxConcurrency,
+  assessmentConfig = {},
 } = {}) {
   if (!workspacePath || !runId || !language) {
     throw new Error("workspacePath, runId, and language are required");
@@ -149,6 +181,7 @@ export function prepareAssessmentRun({
     attemptScratchRoot: resolvedScratchRoot,
     maxConcurrency,
   });
+  plan.assessmentConfig = { ...assessmentConfig };
 
   fs.mkdirSync(memoryDir, { recursive: true });
   if (resolvedScratchRoot) fs.mkdirSync(resolvedScratchRoot, { recursive: true });

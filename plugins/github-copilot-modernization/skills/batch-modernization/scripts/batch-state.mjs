@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import { sanitizeGitUrl } from "./resolve-repos.mjs";
@@ -168,7 +169,7 @@ export function assertSafePersistedValue(value) {
     );
   }
   walkStrings(value, (text) => {
-    const urls = text.match(/(?:https|ssh):\/\/[^\s'"<>]+/gi) ?? [];
+    const urls = text.match(/(?:https?|ssh):\/\/[^\s'"<>]+/gi) ?? [];
     for (const candidate of urls) {
       let parsed;
       try {
@@ -408,34 +409,64 @@ export function updateState({ batchRoot, ownerToken, mutate, now = new Date().to
   });
 }
 
-function nextEventSequence(eventsPath) {
-  if (!fs.existsSync(eventsPath)) return 1;
+function readEventLog(eventsPath) {
+  if (!fs.existsSync(eventsPath)) return [];
   const lines = fs.readFileSync(eventsPath, "utf8").split(/\r?\n/).filter(Boolean);
-  if (lines.length === 0) return 1;
-  let last;
-  try {
-    last = JSON.parse(lines.at(-1));
-  } catch (error) {
-    throw new BatchStateError(`Event log is corrupt: ${error.message}`, "invalid_event_log");
+  const events = [];
+  for (const [index, line] of lines.entries()) {
+    try {
+      events.push(JSON.parse(line));
+    } catch (error) {
+      throw new BatchStateError(`Event log is corrupt at line ${index + 1}: ${error.message}`, "invalid_event_log");
+    }
   }
-  return Number(last.sequence) + 1;
+  return events;
 }
 
-export function appendEvent({ batchRoot, ownerToken, event, now = new Date().toISOString() } = {}) {
+function sameEvent(existing, candidate) {
+  return existing.type === candidate.type
+    && existing.repoId === candidate.repoId
+    && existing.executionUnitId === candidate.executionUnitId
+    && existing.invocationId === candidate.invocationId
+    && isDeepStrictEqual(existing.payload, candidate.payload);
+}
+
+export function appendEvent({
+  batchRoot,
+  ownerToken,
+  event,
+  operationKey,
+  now = new Date().toISOString(),
+} = {}) {
   const files = pathsFor(batchRoot);
   return withExclusiveLock(files.takeoverLock, () => {
     assertWritableLease(batchRoot, ownerToken);
-    const persisted = {
-      schemaVersion: 1,
-      eventId: crypto.randomUUID(),
-      sequence: nextEventSequence(files.events),
-      batchId: readState(batchRoot).batchId,
+    const events = readEventLog(files.events);
+    const candidate = {
       type: event.type,
-      at: now,
       repoId: event.repoId ?? null,
       executionUnitId: event.executionUnitId ?? null,
       invocationId: event.invocationId ?? null,
-      payload: event.payload ?? {},
+      payload: operationKey
+        ? { ...(event.payload ?? {}), operationKey }
+        : event.payload ?? {},
+    };
+    if (operationKey) {
+      const existing = events.find((entry) => entry.payload?.operationKey === operationKey);
+      if (existing) {
+        if (!sameEvent(existing, candidate)) {
+          throw new BatchStateError("Event operation key is already bound to different content", "event_operation_conflict");
+        }
+        return existing;
+      }
+    }
+    const persisted = {
+      schemaVersion: 1,
+      eventId: crypto.randomUUID(),
+      sequence: events.length === 0 ? 1 : Number(events.at(-1).sequence) + 1,
+      batchId: readState(batchRoot).batchId,
+      ...candidate,
+      at: now,
     };
     assertSafePersistedValue(persisted);
     assertDocumentSchema(persisted, eventSchema, eventSchemaPath, "Batch event");

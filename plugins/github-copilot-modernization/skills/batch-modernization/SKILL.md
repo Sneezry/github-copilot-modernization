@@ -8,7 +8,7 @@ user-invocable: false
 
 This skill owns deterministic batch configuration and state operations. It does not assess source code, generate plans, execute migrations, or invoke MCP tools.
 
-Stage 1B exposes an explicit-intent private preview for Batch Assessment. Planning, Execution, implicit configuration discovery, retry, and takeover scheduling remain disabled. Use only the scripts under `scripts/`; never edit batch state files manually.
+Stage 1B exposes a config-aware private preview for Batch Assessment. `modernize` is the only public entry. Every new request uses the read-only default-config probe first. When `.github/modernize/repos.json` exists, the first question always asks Batch or Single, regardless of scope wording; when absent, explicit scope applies and otherwise classic Single remains the default. Configuration discovery never selects Batch or approves execution. Planning, Execution, retry, and takeover scheduling remain disabled. Use only the scripts under `scripts/`; never edit batch state files manually.
 
 ## Hard Boundaries
 
@@ -29,6 +29,17 @@ Stage 1B exposes an explicit-intent private preview for Batch Assessment. Planni
 - `plugin-root`: Resolve from `CLAUDE_PLUGIN_ROOT`, `COPILOT_PLUGIN_ROOT`, or `PLUGIN_ROOT` before invoking plugin scripts.
 
 Read [references/repos-json-compatibility.md](references/repos-json-compatibility.md) before resolving configuration and [references/phase-contract.md](references/phase-contract.md) before creating state or validating a phase result.
+
+## 0. Probe The Default Configuration
+
+For every new top-level request, the internal `batch-mode-probe` runs only:
+
+```powershell
+node <plugin-root>/skills/batch-modernization/scripts/probe-default-config.mjs `
+	--launch-root <launch-root>
+```
+
+The probe checks the fixed default path without reading the file or creating artifacts. `found` requires `modernize` to ask **Process repositories from repos.json** or **Only process the current repository**. Only the first choice permits Batch Review; neither choice is execution approval.
 
 ## 1. Resolve Configuration
 
@@ -138,4 +149,4 @@ node <plugin-root>/skills/batch-modernization/scripts/batch-attempt.mjs session-
 
 ## Completion
 
-Stage 1B completion means an explicitly approved set of execution units can run sequential Batch Assessment attempts, produce verified existing report formats, and finish with an aggregate summary. It does not authorize Planning or Execution, retry terminal units, or schedule work after takeover. Single-repository defaults and artifacts remain unchanged.
+Stage 1B completion means an explicitly approved set of execution units can run sequential Batch Assessment attempts, preserve the verified canonical repository reports, and atomically publish a user-facing `assessment/reports-<timestamp>/` tree containing `index.html`, `aggregate-report.json`, and digest-identical per-repository snapshots. Internal batch state remains under `batches/<batch-id>/`. It does not authorize Planning or Execution, retry terminal units, or schedule work after takeover. Single-repository defaults and artifacts remain unchanged.

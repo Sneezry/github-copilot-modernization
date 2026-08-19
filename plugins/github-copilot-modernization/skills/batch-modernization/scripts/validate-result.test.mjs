@@ -4,6 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import {
+  FACT_SKILL_IDS,
+  SECURITY_CWE_SKILL_IDS,
+} from "../../assessment/scripts/assessment-catalog.mjs";
 import { validateAttemptResult, validateAttemptResultFile } from "./validate-result.mjs";
 
 const identity = {
@@ -13,6 +17,16 @@ const identity = {
   executionUnitId: "orders",
   attempt: 1,
 };
+const runId = `batch-${identity.invocationId}`;
+const language = "java";
+const domains = ["cloud-readiness"];
+
+function reportIdForRunId(value) {
+  const timestamp = (String(value).match(/\d+/g) ?? []).join("").slice(0, 14);
+  return /^\d{14}$/.test(timestamp)
+    ? timestamp
+    : String(value).replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "run";
+}
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "batch-result-"));
@@ -20,8 +34,98 @@ function fixture(t) {
   const workspacePath = path.join(root, "workspace");
   fs.mkdirSync(batchRoot);
   fs.mkdirSync(workspacePath);
+  const attemptDirectory = path.join(batchRoot, "attempt");
+  fs.mkdirSync(attemptDirectory);
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  return { root, batchRoot, workspacePath };
+  return { root, batchRoot, workspacePath, attemptDirectory };
+}
+
+function writeAssessmentArtifacts(value, {
+  selectedDomains = domains,
+  analysisCoverage = "issue-only",
+  selectedRunId = runId,
+  selectedLanguage = language,
+  assessmentConfig = {},
+  bySeverity = { critical: 0, high: 0, medium: 0, low: 0, info: 0 },
+  byState = {},
+  topRecommendation = {
+    kind: "no-findings",
+    summary: "No outstanding findings for focus 'overview'.",
+    next_action: null,
+    prefilled_prompt: null,
+  },
+} = {}) {
+  const reportDirectory = path.join(value.workspacePath, "assessment", reportIdForRunId(selectedRunId));
+  fs.mkdirSync(reportDirectory, { recursive: true });
+  const report = path.join(reportDirectory, "report.json");
+  const html = path.join(value.workspacePath, "assessment", "report.html");
+  const reportValue = {
+    version: "1.1.0",
+    metadata: {
+      id: reportIdForRunId(selectedRunId),
+      runId: selectedRunId,
+      generatedAt: "2026-08-12T12:00:00Z",
+      analysisStartTime: "2026-08-12T11:59:00Z",
+      analysisEndTime: "2026-08-12T12:00:00Z",
+      status: "completed",
+      domains: selectedDomains,
+      language: selectedLanguage,
+      intent: Object.keys(assessmentConfig).length > 0
+        ? { assessment_config: assessmentConfig }
+        : {},
+      totalFindings: 0,
+      totalActionableFindings: 0,
+      totalTrackedFindings: 0,
+    },
+    categories: [],
+    findings: [],
+    security: [],
+  };
+  fs.writeFileSync(report, `${JSON.stringify(reportValue, null, 2)}\n`);
+  const payload = {
+    meta: { run_id: selectedRunId },
+    intent: Object.keys(assessmentConfig).length > 0
+      ? { assessment_config: assessmentConfig }
+      : {},
+    selected_groups: selectedDomains,
+    counts: { total: 0, by_severity: bySeverity, by_state: byState },
+    top_recommendation: topRecommendation,
+  };
+  fs.writeFileSync(
+    html,
+    `<!doctype html><html><script type="application/json" id="report-data">${JSON.stringify(payload)}</script>${"complete".repeat(2_000)}</html>`,
+  );
+  const artifacts = { report, html };
+  if (selectedDomains.some((domain) => domain !== "security")) {
+    const appcat = path.join(value.workspacePath, "assessment", "appcat.json");
+    fs.writeFileSync(appcat, "{\"rules\":[],\"incidents\":[]}\n");
+    artifacts.appcat = appcat;
+  }
+  if (analysisCoverage === "full") {
+    const factsDirectory = path.join(reportDirectory, "facts");
+    fs.mkdirSync(factsDirectory);
+    for (const skillId of FACT_SKILL_IDS) {
+      fs.writeFileSync(path.join(factsDirectory, `${skillId}.md`), `# ${skillId}\n`);
+    }
+  }
+  if (selectedDomains.includes("security")) {
+    const securityDirectory = path.join(
+      value.attemptDirectory,
+      "scratch",
+      "engines",
+      "security",
+      "incoming",
+    );
+    fs.mkdirSync(securityDirectory, { recursive: true });
+    fs.writeFileSync(path.join(securityDirectory, "cve-known-vulnerabilities.json"), "[]\n");
+    for (const skillId of SECURITY_CWE_SKILL_IDS) {
+      fs.writeFileSync(
+        path.join(securityDirectory, `${skillId}.json`),
+        `${JSON.stringify({ status: "success", result: { values: [{ status: "NOT_FOUND" }] } })}\n`,
+      );
+    }
+  }
+  return { artifacts, reportValue, report, html, payload };
 }
 
 function baseResult(phase, artifacts, extra = {}) {
@@ -31,7 +135,7 @@ function baseResult(phase, artifacts, extra = {}) {
     phase,
     status: "completed",
     artifacts,
-    evidence: { artifactValidation: "not_run" },
+    evidence: { artifactValidation: "passed" },
     needsInput: null,
     error: null,
     completedAt: "2026-08-12T12:00:00.000Z",
@@ -39,27 +143,192 @@ function baseResult(phase, artifacts, extra = {}) {
   };
 }
 
-function options(fixtureValue, phase) {
-  return {
+function options(fixtureValue, phase, assessment = {}) {
+  const result = {
     batchRoot: fixtureValue.batchRoot,
     workspacePath: fixtureValue.workspacePath,
     expected: { ...identity, phase },
   };
+  if (phase === "assessment") {
+    result.assessment = {
+      runId,
+      language,
+      domains,
+      analysisCoverage: "issue-only",
+      attemptDirectory: fixtureValue.attemptDirectory,
+      workspacePath: fixtureValue.workspacePath,
+      ...assessment,
+    };
+  }
+  return result;
 }
 
-test("assessment completion requires parseable report and non-empty HTML inside allowed roots", (t) => {
+test("assessment completion binds validated JSON and HTML reports to the attempt", (t) => {
   const value = fixture(t);
-  const report = path.join(value.workspacePath, "report.json");
-  const html = path.join(value.workspacePath, "report.html");
-  fs.writeFileSync(report, "{}\n");
-  fs.writeFileSync(html, "<html></html>\n");
-  const result = baseResult("assessment", { report, html });
+  const { artifacts } = writeAssessmentArtifacts(value);
+  const result = baseResult("assessment", artifacts);
   assert.deepEqual(validateAttemptResult(result, options(value, "assessment")), {
     valid: true,
     status: "completed",
     errors: [],
-    artifacts: { report, html },
+    artifacts,
   });
+
+  const unverified = baseResult("assessment", artifacts, {
+    evidence: { artifactValidation: "not_run" },
+  });
+  assert.match(
+    validateAttemptResult(unverified, options(value, "assessment")).errors.join("\n"),
+    /artifactValidation to be passed/,
+  );
+});
+
+test("assessment completion binds explicit config to JSON and HTML", (t) => {
+  const value = fixture(t);
+  const assessmentConfig = {
+    targetRuntime: "java-21",
+    targetComputeServices: ["azure-container-apps"],
+    enableContainerization: true,
+    targetOS: ["linux"],
+    minimumCveSeverity: "high",
+    cveScanScope: "all",
+  };
+  const created = writeAssessmentArtifacts(value, { assessmentConfig });
+  const result = baseResult("assessment", created.artifacts);
+  const policy = options(value, "assessment", { assessmentConfig });
+  assert.deepEqual(validateAttemptResult(result, policy), {
+    valid: true,
+    status: "completed",
+    errors: [],
+    artifacts: created.artifacts,
+  });
+
+  fs.writeFileSync(created.report, `${JSON.stringify({
+    ...created.reportValue,
+    metadata: { ...created.reportValue.metadata, intent: {} },
+  }, null, 2)}\n`);
+  assert.match(validateAttemptResult(result, policy).errors.join("\n"), /report config/);
+
+  fs.writeFileSync(created.report, `${JSON.stringify(created.reportValue, null, 2)}\n`);
+  const html = fs.readFileSync(created.html, "utf8").replace(
+    JSON.stringify({ assessment_config: assessmentConfig }),
+    JSON.stringify({ assessment_config: { ...assessmentConfig, targetRuntime: "java-17" } }),
+  );
+  fs.writeFileSync(created.html, html);
+  assert.match(validateAttemptResult(result, policy).errors.join("\n"), /HTML config/);
+});
+
+test("assessment completion rejects incomplete Single summary semantics", (t) => {
+  const value = fixture(t);
+  const created = writeAssessmentArtifacts(value);
+  const malformedPayload = {
+    ...created.payload,
+    counts: {
+      ...created.payload.counts,
+      by_severity: { critical: 1, high: 0, medium: 0, low: 0, info: 0 },
+    },
+  };
+  fs.writeFileSync(
+    created.html,
+    `<!doctype html><html><script type="application/json" id="report-data">${JSON.stringify(malformedPayload)}</script>${"complete".repeat(2_000)}</html>`,
+  );
+  assert.match(
+    validateAttemptResult(baseResult("assessment", created.artifacts), options(value, "assessment")).errors.join("\n"),
+    /severity counts do not sum/,
+  );
+});
+
+test("assessment completion rejects malformed, stale, or fabricated reports", (t) => {
+  const value = fixture(t);
+  const created = writeAssessmentArtifacts(value);
+  const result = baseResult("assessment", created.artifacts);
+
+  fs.writeFileSync(created.report, "{}\n");
+  assert.match(validateAttemptResult(result, options(value, "assessment")).errors.join("\n"), /metadata is required/);
+
+  created.reportValue.version = "1.0.0";
+  created.reportValue.metadata.runId = "stale-run";
+  fs.writeFileSync(created.report, `${JSON.stringify(created.reportValue)}\n`);
+  const staleErrors = validateAttemptResult(result, options(value, "assessment")).errors.join("\n");
+  assert.match(staleErrors, /version/);
+  assert.match(staleErrors, /runId does not match/);
+
+  const valid = writeAssessmentArtifacts(value);
+  fs.writeFileSync(valid.html, `<html>${"x".repeat(11_000)}</html>`);
+  assert.match(
+    validateAttemptResult(baseResult("assessment", valid.artifacts), options(value, "assessment")).errors.join("\n"),
+    /no embedded report-data payload/,
+  );
+});
+
+test("assessment completion verifies full facts and terminal security evidence", (t) => {
+  const value = fixture(t);
+  const selectedDomains = ["security"];
+  const created = writeAssessmentArtifacts(value, { selectedDomains, analysisCoverage: "full" });
+  const result = baseResult("assessment", created.artifacts);
+  const policy = options(value, "assessment", {
+    domains: selectedDomains,
+    analysisCoverage: "full",
+  });
+  assert.equal(validateAttemptResult(result, policy).valid, true);
+
+  fs.rmSync(path.join(path.dirname(created.report), "facts", `${FACT_SKILL_IDS[0]}.md`));
+  assert.match(validateAttemptResult(result, policy).errors.join("\n"), /full coverage fact is missing/);
+
+  fs.writeFileSync(path.join(path.dirname(created.report), "facts", `${FACT_SKILL_IDS[0]}.md`), "# restored\n");
+  const pendingPath = path.join(
+    value.attemptDirectory,
+    "scratch",
+    "engines",
+    "security",
+    "incoming",
+    `${SECURITY_CWE_SKILL_IDS[0]}.json`,
+  );
+  fs.writeFileSync(pendingPath, '{"status":"success","result":{"values":[{"status":"PENDING"}]}}\n');
+  assert.match(validateAttemptResult(result, policy).errors.join("\n"), /not FOUND or NOT_FOUND/);
+
+  fs.writeFileSync(pendingPath, '{"status":"partial","result":{"values":[]}}\n');
+  assert.match(validateAttemptResult(
+    baseResult("assessment", created.artifacts, { status: "completed_with_issues" }),
+    policy,
+  ).errors.join("\n"), /partial security task.*failure evidence/);
+});
+
+test("JavaScript cloud assessment does not require an AppCAT artifact", (t) => {
+  const value = fixture(t);
+  const created = writeAssessmentArtifacts(value, { selectedLanguage: "javascript" });
+  delete created.artifacts.appcat;
+  fs.rmSync(path.join(value.workspacePath, "assessment", "appcat.json"));
+  const validation = validateAttemptResult(
+    baseResult("assessment", created.artifacts),
+    options(value, "assessment", { language: "javascript" }),
+  );
+  assert.equal(validation.valid, true, validation.errors.join("\n"));
+});
+
+test("Java cloud assessment discovers AppCAT at the request-bound run path", (t) => {
+  const value = fixture(t);
+  const created = writeAssessmentArtifacts(value);
+  delete created.artifacts.appcat;
+  fs.rmSync(path.join(value.workspacePath, "assessment", "appcat.json"));
+  const appcatPath = path.join(
+    value.workspacePath,
+    ".github",
+    "modernize",
+    ".memory",
+    "runs",
+    runId,
+    "appcat",
+    "report.json",
+  );
+  fs.mkdirSync(path.dirname(appcatPath), { recursive: true });
+  fs.writeFileSync(appcatPath, "{\"rules\":[],\"incidents\":[]}\n");
+  const validation = validateAttemptResult(
+    baseResult("assessment", created.artifacts),
+    options(value, "assessment"),
+  );
+  assert.equal(validation.valid, true, validation.errors.join("\n"));
+  assert.equal(validation.artifacts.appcat, appcatPath);
 });
 
 test("planning completion requires plan and a tasks array", (t) => {
@@ -87,7 +356,7 @@ test("execution completion requires terminal tasks and explicit build/test evide
   fs.writeFileSync(taskStatus, '{"tasks":[{"id":"T1","status":"completed"}]}\n');
   const result = baseResult("execution", { summary, taskStatus }, {
     evidence: {
-      artifactValidation: "not_run",
+      artifactValidation: "passed",
       successCriteria: { build: "passed", tests: "exempt" },
     },
   });

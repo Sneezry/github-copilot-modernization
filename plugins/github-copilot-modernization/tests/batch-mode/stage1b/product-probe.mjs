@@ -14,10 +14,19 @@ const defaultEvidencePath = path.join(
   `product-probe.${process.platform}-${process.arch}.json`,
 );
 
-export const REQUIRED_PRODUCT_FILES = Object.freeze([
+const allAgentFiles = fs.readdirSync(path.join(pluginRoot, "agents"), { withFileTypes: true })
+  .filter((entry) => entry.isFile() && entry.name.endsWith(".agent.md"))
+  .map((entry) => `agents/${entry.name}`);
+const allSkillFiles = fs.readdirSync(path.join(pluginRoot, "skills"), { withFileTypes: true })
+  .filter((entry) => entry.isDirectory())
+  .map((entry) => `skills/${entry.name}/SKILL.md`)
+  .filter((relativePath) => fs.existsSync(path.join(pluginRoot, ...relativePath.split("/"))));
+
+export const REQUIRED_PRODUCT_FILES = Object.freeze([...new Set([
   ".mcp.json",
   "plugin.json",
   "agents/modernize.agent.md",
+  "agents/batch-mode-probe.agent.md",
   "agents/batch-review.agent.md",
   "agents/batch-coordinator.agent.md",
   "agents/batch-assessment.agent.md",
@@ -31,9 +40,14 @@ export const REQUIRED_PRODUCT_FILES = Object.freeze([
   "skills/assessment/scripts/assess-runtime.mjs",
   "skills/assessment/scripts/assess-state.mjs",
   "skills/assessment/scripts/assessment-catalog.mjs",
+  "skills/assessment/resources/solution-mapping.json",
   "skills/batch-modernization/SKILL.md",
   "skills/batch-modernization/references/phase-contract.md",
   "skills/batch-modernization/references/repos-json-compatibility.md",
+  "skills/batch-modernization/schemas/aggregate-report.v1.json",
+  "skills/batch-modernization/schemas/assessment-finalization.v1.json",
+  "skills/batch-modernization/schemas/attempt-validation.v1.json",
+  "skills/batch-modernization/schemas/compatibility-report.v1.json",
   "skills/batch-modernization/schemas/attempt-request.schema.json",
   "skills/batch-modernization/schemas/attempt-result.schema.json",
   "skills/batch-modernization/schemas/batch-state.schema.json",
@@ -42,13 +56,17 @@ export const REQUIRED_PRODUCT_FILES = Object.freeze([
   "skills/batch-modernization/schemas/needs-input.schema.json",
   "skills/batch-modernization/schemas/resolved-repos.schema.json",
   "skills/batch-modernization/scripts/batch-attempt.mjs",
+  "skills/batch-modernization/scripts/batch-assessment-report.mjs",
   "skills/batch-modernization/scripts/batch-state.mjs",
   "skills/batch-modernization/scripts/inspect-workspaces.mjs",
+  "skills/batch-modernization/scripts/probe-default-config.mjs",
   "skills/batch-modernization/scripts/prepare-review.mjs",
   "skills/batch-modernization/scripts/resolve-repos.mjs",
   "skills/batch-modernization/scripts/schema-validator.mjs",
   "skills/batch-modernization/scripts/validate-result.mjs",
-]);
+  ...allAgentFiles,
+  ...allSkillFiles,
+])].sort());
 
 function frontmatterValue(content, name) {
   const frontmatter = content.match(/^---\r?\n([\s\S]*?)\r?\n---/)?.[1] ?? "";
@@ -92,12 +110,19 @@ function initializeFixtureRepository(repositoryPath, name, { blockAssessmentBoot
     "utf8",
   );
   if (blockAssessmentBootstrap) {
-    fs.writeFileSync(path.join(repositoryPath, ".github"), "blocks the Assessment runtime directory\n", "utf8");
+    const modernizePath = path.join(repositoryPath, ".github", "modernize");
+    fs.mkdirSync(modernizePath, { recursive: true });
+    fs.writeFileSync(path.join(modernizePath, ".runtime"), "blocks only the Assessment runtime directory\n", "utf8");
   }
   runGit(["init"], repositoryPath);
   runGit(["config", "user.name", "Batch Product Probe"], repositoryPath);
   runGit(["config", "user.email", "batch-probe@example.invalid"], repositoryPath);
-  runGit(["add", "package.json", "src/index.js", ...(blockAssessmentBootstrap ? [".github"] : [])], repositoryPath);
+  runGit([
+    "add",
+    "package.json",
+    "src/index.js",
+    ...(blockAssessmentBootstrap ? [".github/modernize/.runtime"] : []),
+  ], repositoryPath);
   runGit(["commit", "-m", "Initialize product probe fixture"], repositoryPath);
 }
 
@@ -122,7 +147,7 @@ export function createProductFixture(rootPath, { bootstrapFailureRepository } = 
 
   const canaries = Object.fromEntries(repositories.flatMap((repository) => {
     const relativePaths = ["package.json", "src/index.js"];
-    if (repository.name === bootstrapFailureRepository) relativePaths.push(".github");
+    if (repository.name === bootstrapFailureRepository) relativePaths.push(".github/modernize/.runtime");
     return relativePaths.map((relativePath) => [
       `${repository.name}/${relativePath}`,
       fileSha256(path.join(repository.path, ...relativePath.split("/"))),
@@ -175,7 +200,7 @@ export function validateProductPackage(root = pluginRoot) {
     throw new Error("plugin.json does not expose the expected product surfaces");
   }
 
-  for (const agentName of ["modernize", "batch-review", "batch-coordinator", "batch-assessment"]) {
+  for (const agentName of ["modernize", "batch-mode-probe", "batch-review", "batch-coordinator", "batch-assessment"]) {
     const agentPath = path.join(root, "agents", `${agentName}.agent.md`);
     const content = fs.readFileSync(agentPath, "utf8");
     if (frontmatterValue(content, "name") !== agentName) {
@@ -265,7 +290,12 @@ export function productInvocationArgs({
   ];
 }
 
-export function productAcpInvocationArgs({ workspacePath, model = "auto", agentName = productAgentName } = {}) {
+export function productAcpInvocationArgs({
+  workspacePath,
+  model = "auto",
+  agentName = productAgentName,
+  allowAllTools = true,
+} = {}) {
   return [
     "--acp",
     "-C",
@@ -275,7 +305,7 @@ export function productAcpInvocationArgs({ workspacePath, model = "auto", agentN
     `--agent=${agentName}`,
     "--model",
     model,
-    "--allow-all-tools",
+    ...(allowAllTools ? ["--allow-all-tools"] : []),
     "--disable-builtin-mcps",
     "--no-custom-instructions",
     "--no-remote",
@@ -536,7 +566,12 @@ export async function invokeProductAgentAcp({
   spawnImpl = spawn,
 } = {}) {
   const executable = resolveCopilotBinary(copilotPath ?? process.env.COPILOT_CLI_PATH);
-  const child = spawnImpl(executable, productAcpInvocationArgs({ workspacePath, model, agentName }), {
+  const child = spawnImpl(executable, productAcpInvocationArgs({
+    workspacePath,
+    model,
+    agentName,
+    allowAllTools,
+  }), {
     encoding: "utf8",
     env: productAcpEnvironment(),
     stdio: ["pipe", "pipe", "pipe"],

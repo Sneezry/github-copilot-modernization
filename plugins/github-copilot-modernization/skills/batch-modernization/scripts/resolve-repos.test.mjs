@@ -38,7 +38,7 @@ test("v2 config preserves unknown fields and creates separate include-path units
       include_paths: ["services/api", "services/worker"],
       project_id: "p1",
       future_repo: {
-        callback: "https://user:secret@example.com/hook?token=x#fragment",
+        callback: "http://user:secret@example.com/hook?token=x#fragment",
         accessToken: "plain-secret",
       },
     }],
@@ -58,7 +58,7 @@ test("v2 config preserves unknown fields and creates separate include-path units
   assert.equal(repository.executionUnits[0].workspacePath, path.join(launchRoot, "orders", "services", "api"));
   assert.deepEqual(repository.unknownFields, {
     project_id: "p1",
-    future_repo: { callback: "https://example.com/hook", accessToken: "<redacted>" },
+    future_repo: { callback: "http://example.com/hook", accessToken: "<redacted>" },
   });
   assert.deepEqual(result.unknownFields, { future_root: { enabled: true } });
   assert.deepEqual(result.apps[0], {

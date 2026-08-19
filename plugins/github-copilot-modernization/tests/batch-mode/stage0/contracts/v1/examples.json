@@ -75,6 +75,9 @@
     "scopeRoots": [
       "C:\\work\\repos\\orders-api\\src\\orders"
     ],
+    "assessmentCliPath": "C:\\plugins\\github-copilot-modernization\\skills\\assessment\\scripts\\assess-cli.mjs",
+    "runId": "batch-4f7e6f2d-8e4f-4e7d-a5d4-3ab29ed8dd3d",
+    "language": "java",
     "phase": "assessment",
     "attempt": 1,
     "mode": "batch-headless",
@@ -82,7 +85,11 @@
     "phaseApproved": true,
     "resultPath": "C:\\work\\.github\\modernize\\batches\\20260812-143000-assess\\attempts\\orders-api\\assessment\\1\\result.json",
     "inputArtifacts": {},
-    "decisions": {}
+    "decisions": {
+      "domains": ["cloud-readiness"],
+      "analysisCoverage": "issue-only",
+      "maxConcurrency": 1
+    }
   },
   "needs-input.schema.json": {
     "schemaVersion": 1,

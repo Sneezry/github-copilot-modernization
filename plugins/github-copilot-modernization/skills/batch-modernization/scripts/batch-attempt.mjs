@@ -7,6 +7,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { isDeepStrictEqual } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -16,22 +17,35 @@ import {
   assertSafePersistedValue,
   assertSchedulingAllowed,
   atomicWriteJson,
+  fileDigest,
   initializeBatch,
+  readLease,
   readState,
   releaseLease,
   updateState,
   writeRepoState,
   writeSummary,
 } from "./batch-state.mjs";
+import {
+  assessmentReportPaths,
+  directoryDigest,
+  publishBatchAssessmentReport,
+} from "./batch-assessment-report.mjs";
 import { validateSchema } from "./schema-validator.mjs";
 import { validateAttemptResultFile } from "./validate-result.mjs";
+import { defaultAssessmentDomains } from "../../assessment/scripts/assessment-catalog.mjs";
 
 const scriptRoot = path.dirname(fileURLToPath(import.meta.url));
+const assessmentCliPath = fileURLToPath(new URL("../../assessment/scripts/assess-cli.mjs", import.meta.url));
 const requestSchemaPath = path.resolve(scriptRoot, "..", "schemas", "attempt-request.schema.json");
 const resultSchemaPath = path.resolve(scriptRoot, "..", "schemas", "attempt-result.schema.json");
+const validationSchemaPath = path.resolve(scriptRoot, "..", "schemas", "attempt-validation.v1.json");
+const finalizationSchemaPath = path.resolve(scriptRoot, "..", "schemas", "assessment-finalization.v1.json");
 const resolvedSchemaPath = path.resolve(scriptRoot, "..", "schemas", "resolved-repos.schema.json");
 const requestSchema = JSON.parse(fs.readFileSync(requestSchemaPath, "utf8"));
 const resultSchema = JSON.parse(fs.readFileSync(resultSchemaPath, "utf8"));
+const validationSchema = JSON.parse(fs.readFileSync(validationSchemaPath, "utf8"));
+const finalizationSchema = JSON.parse(fs.readFileSync(finalizationSchemaPath, "utf8"));
 const resolvedSchema = JSON.parse(fs.readFileSync(resolvedSchemaPath, "utf8"));
 const ACTIVE_STATUSES = new Set(["preparing", "running"]);
 const TERMINAL_STATUSES = new Set([
@@ -44,6 +58,20 @@ const TERMINAL_STATUSES = new Set([
 const LEASE_SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const LEASE_SESSION_IDLE_MS = 6 * 60 * 60 * 1000;
 const LEASE_SESSION_MAX_MESSAGE_BYTES = 1024 * 1024;
+const ASSESSMENT_CONFIG_FIELDS = [
+  "targetRuntime",
+  "targetComputeServices",
+  "enableContainerization",
+  "targetOS",
+  "minimumCveSeverity",
+  "cveScanScope",
+];
+
+function assessmentConfig(decisions = {}) {
+  return Object.fromEntries(ASSESSMENT_CONFIG_FIELDS
+    .filter((name) => decisions[name] !== undefined)
+    .map((name) => [name, decisions[name]]));
+}
 
 function leaseSessionEndpoint(leaseSessionId) {
   if (!LEASE_SESSION_ID_PATTERN.test(leaseSessionId ?? "")) {
@@ -107,6 +135,18 @@ function createJsonExclusive(filePath, value) {
   }
 }
 
+function createOrVerifyJson(filePath, value, schemaValue, schemaFilePath, label) {
+  if (fs.existsSync(filePath)) {
+    const existing = validatedDocument(filePath, schemaValue, schemaFilePath, label);
+    if (!isDeepStrictEqual(existing, value)) {
+      throw new BatchStateError(`${label} conflicts with the existing immutable artifact`, "attempt_artifact_conflict");
+    }
+    return false;
+  }
+  createJsonExclusive(filePath, value);
+  return true;
+}
+
 function manifestUnit(batchRoot, executionUnitId) {
   const manifest = jsonDocument(path.join(batchRoot, "manifest.json"), "batch manifest");
   if (manifest.schemaVersion !== 1) {
@@ -122,6 +162,69 @@ function manifestUnit(batchRoot, executionUnitId) {
     );
   }
   return matches[0];
+}
+
+function executionUnitLanguage(unit) {
+  const supported = new Set(["java", "dotnet", "javascript", "typescript"]);
+  if (!Array.isArray(unit.languages)
+      || unit.languages.length !== 1
+      || !supported.has(unit.languages[0])) {
+    throw new BatchStateError(
+      `Execution unit ${JSON.stringify(unit.executionUnitId)} must have exactly one supported language`,
+      "unsupported_execution_unit_languages",
+    );
+  }
+  return unit.languages[0];
+}
+
+function effectiveAssessmentDecisions(decisions, language) {
+  return {
+    ...decisions,
+    domains: decisions.domains ?? defaultAssessmentDomains(language),
+  };
+}
+
+function assertRequestMatchesBatch(batchRoot, requestPath, request) {
+  const manifest = jsonDocument(path.join(batchRoot, "manifest.json"), "batch manifest");
+  const unit = manifestUnit(batchRoot, request.executionUnitId);
+  const expected = {
+    batchId: manifest.batchId,
+    repoId: unit.repoId,
+    workspacePath: unit.workspacePath,
+    scopeRoots: unit.scopeRoots,
+    assessmentCliPath,
+    runId: `batch-${request.invocationId.toLowerCase()}`,
+    language: executionUnitLanguage(unit),
+    phase: "assessment",
+    attempt: 1,
+    mode: "batch-headless",
+    userRequest: manifest.assessment?.userRequest,
+    phaseApproved: true,
+    inputArtifacts: manifest.assessment?.inputArtifacts ?? {},
+    decisions: effectiveAssessmentDecisions(
+      manifest.assessment?.decisions ?? {},
+      executionUnitLanguage(unit),
+    ),
+  };
+  for (const [field, value] of Object.entries(expected)) {
+    if (!isDeepStrictEqual(request[field], value)) {
+      throw new BatchStateError(
+        `Attempt request ${field} does not match the initialized batch`,
+        "attempt_request_mismatch",
+      );
+    }
+  }
+  const expectedDirectory = attemptDirectory(
+    batchRoot,
+    unit.repoId,
+    unit.executionUnitId,
+    request.phase,
+    request.attempt,
+  );
+  if (path.resolve(requestPath) !== path.join(expectedDirectory, "request.json")
+      || path.resolve(request.resultPath) !== path.join(expectedDirectory, "result.json")) {
+    throw new BatchStateError("Attempt request paths do not match the initialized batch", "attempt_request_mismatch");
+  }
 }
 
 function attemptDirectory(batchRoot, repoId, executionUnitId, phase, attempt) {
@@ -151,11 +254,29 @@ function validateAttemptInput(input) {
   }
 }
 
-function validateAssessmentDecisions(decisions) {
+function validateAssessmentDecisions(decisions, { domainsRequired = false, allowEmptyDomains = false } = {}) {
   const supportedDomains = new Set(["security", "cloud-readiness", "java-upgrade"]);
-  if (!Array.isArray(decisions?.domains)
-      || decisions.domains.length === 0
-      || decisions.domains.some((domain) => !supportedDomains.has(domain))) {
+  const supportedFields = new Set([
+    "domains",
+    "analysisCoverage",
+    "maxConcurrency",
+    ...ASSESSMENT_CONFIG_FIELDS,
+  ]);
+  const unknownFields = Object.keys(decisions ?? {}).filter((name) => !supportedFields.has(name));
+  if (unknownFields.length > 0) {
+    throw new BatchStateError(
+      `Assessment decisions contain unsupported fields: ${unknownFields.join(", ")}`,
+      "invalid_assessment_decisions",
+    );
+  }
+  const domains = decisions?.domains;
+  if ((domainsRequired && !Array.isArray(domains))
+      || (domains !== undefined && (
+        !Array.isArray(domains)
+        || (!allowEmptyDomains && domains.length === 0)
+        || new Set(domains).size !== domains.length
+        || domains.some((domain) => !supportedDomains.has(domain))
+      ))) {
     throw new BatchStateError("Assessment decisions require supported domains", "invalid_assessment_decisions");
   }
   if (!["issue-only", "full"].includes(decisions.analysisCoverage)) {
@@ -165,6 +286,26 @@ function validateAssessmentDecisions(decisions) {
       || decisions.maxConcurrency < 1
       || decisions.maxConcurrency > 7) {
     throw new BatchStateError("Assessment maxConcurrency must be between 1 and 7", "invalid_assessment_decisions");
+  }
+  for (const name of ["targetRuntime", "minimumCveSeverity", "cveScanScope"]) {
+    if (decisions[name] !== undefined && (typeof decisions[name] !== "string" || !decisions[name].trim())) {
+      throw new BatchStateError(`Assessment ${name} must be a non-empty string`, "invalid_assessment_decisions");
+    }
+  }
+  for (const name of ["targetComputeServices", "targetOS"]) {
+    const value = decisions[name];
+    if (value !== undefined && (
+      !Array.isArray(value)
+      || value.length === 0
+      || new Set(value).size !== value.length
+      || value.some((entry) => typeof entry !== "string" || !entry.trim())
+    )) {
+      throw new BatchStateError(`Assessment ${name} must be a non-empty unique string array`, "invalid_assessment_decisions");
+    }
+  }
+  if (decisions.enableContainerization !== undefined
+      && typeof decisions.enableContainerization !== "boolean") {
+    throw new BatchStateError("Assessment enableContainerization must be a boolean", "invalid_assessment_decisions");
   }
 }
 
@@ -206,7 +347,15 @@ export function initializeAssessmentBatch({
         "attention_not_approved",
       );
     }
-    units.push(repository.executionUnits.find((unit) => unit.executionUnitId === executionUnitId));
+    const unit = repository.executionUnits.find((candidate) => candidate.executionUnitId === executionUnitId);
+    executionUnitLanguage(unit);
+    if (unit.source === "include-path") {
+      throw new BatchStateError(
+        `Stage 1B supports whole repositories only; include-path execution unit is not supported: ${executionUnitId}`,
+        "unsupported_execution_unit_source",
+      );
+    }
+    units.push(unit);
   }
   const batchId = input.batchId;
   if (typeof batchId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(batchId)) {
@@ -259,8 +408,9 @@ export function startAttempt({
   executionUnitId,
   phase = "assessment",
   input,
-  invocationId = crypto.randomUUID(),
+  invocationId,
   now = new Date().toISOString(),
+  checkpoint,
 } = {}) {
   if (phase !== "assessment") {
     throw new BatchStateError("Stage 1B supports assessment attempts only", "phase_not_supported");
@@ -272,9 +422,6 @@ export function startAttempt({
   assertSafePersistedValue(attemptInput);
   assertSchedulingAllowed(batchRoot, ownerToken);
   const current = readState(batchRoot);
-  if (current.executionUnits.some((unit) => ACTIVE_STATUSES.has(unit.status))) {
-    throw new BatchStateError("Another attempt is already active", "attempt_already_active");
-  }
   const unitIndex = current.executionUnits.findIndex(
     (unit) => unit.executionUnitId === executionUnitId && unit.phase === phase,
   );
@@ -282,25 +429,50 @@ export function startAttempt({
     throw new BatchStateError("Execution unit is not scheduled for this phase", "execution_unit_not_scheduled");
   }
   const scheduled = current.executionUnits[unitIndex];
-  if (scheduled.status !== "pending" || scheduled.attempt !== 0) {
-    throw new BatchStateError("Stage 1B starts only a pending first attempt", "attempt_not_startable");
-  }
   const unit = manifestUnit(batchRoot, executionUnitId);
   if (unit.repoId !== scheduled.repoId) {
     throw new BatchStateError("Manifest and state repository identities differ", "attempt_identity_mismatch");
   }
+  const language = executionUnitLanguage(unit);
+  const decisions = effectiveAssessmentDecisions(attemptInput.decisions, language);
+  validateAssessmentDecisions(decisions, {
+    domainsRequired: true,
+    allowEmptyDomains: language === "javascript" || language === "typescript",
+  });
   const attempt = 1;
   const directory = attemptDirectory(batchRoot, unit.repoId, executionUnitId, phase, attempt);
   const requestPath = path.join(directory, "request.json");
   const resultPath = path.join(directory, "result.json");
+  const existingRequest = fs.existsSync(requestPath)
+    ? validatedDocument(requestPath, requestSchema, requestSchemaPath, "attempt request")
+    : null;
+  if (existingRequest) assertRequestMatchesBatch(batchRoot, requestPath, existingRequest);
+  if (existingRequest && invocationId && existingRequest.invocationId !== invocationId) {
+    throw new BatchStateError("Attempt request is already bound to another invocation", "attempt_artifact_conflict");
+  }
+  const effectiveInvocationId = existingRequest?.invocationId ?? invocationId ?? crypto.randomUUID();
+  const matchingReplay = scheduled.status === "running"
+    && scheduled.attempt === attempt
+    && scheduled.invocationId === effectiveInvocationId
+    && scheduled.resultPath === resultPath;
+  const activeUnits = current.executionUnits.filter((candidate) => ACTIVE_STATUSES.has(candidate.status));
+  if (activeUnits.length > 0 && !matchingReplay) {
+    throw new BatchStateError("Another attempt is already active", "attempt_already_active");
+  }
+  if (!matchingReplay && (scheduled.status !== "pending" || scheduled.attempt !== 0)) {
+    throw new BatchStateError("Stage 1B starts only a pending first attempt", "attempt_not_startable");
+  }
   const request = {
     schemaVersion: 1,
     batchId: current.batchId,
-    invocationId,
+    invocationId: effectiveInvocationId,
     repoId: unit.repoId,
     executionUnitId,
     workspacePath: unit.workspacePath,
     scopeRoots: unit.scopeRoots,
+    assessmentCliPath,
+    runId: `batch-${effectiveInvocationId.toLowerCase()}`,
+    language,
     phase,
     attempt,
     mode: "batch-headless",
@@ -308,55 +480,69 @@ export function startAttempt({
     phaseApproved: true,
     resultPath,
     inputArtifacts: attemptInput.inputArtifacts ?? {},
-    decisions: attemptInput.decisions,
+    decisions,
   };
   const errors = validateSchema(request, requestSchema, requestSchemaPath);
   if (errors.length > 0) {
     throw new BatchStateError(`Attempt request violates its v1 schema: ${errors.join("; ")}`, "schema_validation_failed");
   }
   assertSafePersistedValue(request);
-  createJsonExclusive(requestPath, request);
+  const requestCreated = createOrVerifyJson(
+    requestPath,
+    request,
+    requestSchema,
+    requestSchemaPath,
+    "attempt request",
+  );
+  checkpoint?.("request");
   let state;
-  try {
-    state = updateState({
-      batchRoot,
-      ownerToken,
-      now,
-      mutate: (draft) => {
-        const stateUnit = draft.executionUnits.find(
-          (candidate) => candidate.executionUnitId === executionUnitId && candidate.phase === phase,
-        );
-        if (!stateUnit || stateUnit.status !== "pending" || stateUnit.attempt !== 0) {
-          throw new BatchStateError("Execution unit changed before dispatch", "attempt_compare_failed");
-        }
-        Object.assign(stateUnit, {
-          attempt,
-          invocationId,
-          status: "running",
-          resultPath,
-          startedAt: now,
-          finishedAt: null,
-        });
-        draft.status = "running";
-        return draft;
-      },
-    });
-  } catch (error) {
-    fs.rmSync(requestPath, { force: true });
-    throw error;
+  if (matchingReplay) {
+    state = current;
+  } else {
+    try {
+      state = updateState({
+        batchRoot,
+        ownerToken,
+        now,
+        mutate: (draft) => {
+          const stateUnit = draft.executionUnits.find(
+            (candidate) => candidate.executionUnitId === executionUnitId && candidate.phase === phase,
+          );
+          if (!stateUnit || stateUnit.status !== "pending" || stateUnit.attempt !== 0) {
+            throw new BatchStateError("Execution unit changed before dispatch", "attempt_compare_failed");
+          }
+          Object.assign(stateUnit, {
+            attempt,
+            invocationId: effectiveInvocationId,
+            status: "running",
+            resultPath,
+            startedAt: now,
+            finishedAt: null,
+          });
+          draft.status = "running";
+          return draft;
+        },
+      });
+    } catch (error) {
+      if (requestCreated) fs.rmSync(requestPath, { force: true });
+      throw error;
+    }
   }
+  checkpoint?.("state");
   appendEvent({
     batchRoot,
     ownerToken,
     now,
+    operationKey: attemptOperationKey("start", request),
     event: {
       type: "attempt_started",
       repoId: unit.repoId,
       executionUnitId,
-      invocationId,
+      invocationId: effectiveInvocationId,
       payload: { phase, attempt, requestPath, resultPath },
     },
   });
+  checkpoint?.("event");
   return { requestPath, resultPath, request, state };
 }
 
@@ -407,6 +593,140 @@ function stateStatus(resultStatus) {
   return resultStatus;
 }
 
+function attemptOperationKey(operation, request) {
+  return [
+    operation,
+    request.batchId,
+    request.executionUnitId,
+    request.phase,
+    request.attempt,
+    request.invocationId,
+  ].join(":");
+}
+
+function validationRecordPath(requestPath) {
+  return path.join(path.dirname(path.resolve(requestPath)), "validation.json");
+}
+
+function finalizationRecordPath(batchRoot) {
+  return path.join(path.resolve(batchRoot), "finalization.json");
+}
+
+function validationFromRecord(record) {
+  return {
+    valid: record.valid,
+    status: record.status,
+    errors: record.errors,
+    artifacts: record.artifacts,
+  };
+}
+
+function validateResultAgainstRequest(batchRoot, requestPath, request) {
+  return validateAttemptResultFile(request.resultPath, {
+    batchRoot,
+    workspacePath: request.workspacePath,
+    expected: {
+      batchId: request.batchId,
+      invocationId: request.invocationId,
+      repoId: request.repoId,
+      executionUnitId: request.executionUnitId,
+      phase: request.phase,
+      attempt: request.attempt,
+    },
+    assessment: {
+      runId: request.runId,
+      language: request.language,
+      domains: request.decisions.domains,
+      analysisCoverage: request.decisions.analysisCoverage,
+      assessmentConfig: assessmentConfig(request.decisions),
+      attemptDirectory: path.dirname(path.resolve(requestPath)),
+      workspacePath: request.workspacePath,
+    },
+  });
+}
+
+function artifactDigests(artifacts) {
+  return Object.fromEntries(
+    Object.entries(artifacts).map(([name, artifactPath]) => [name, fileDigest(artifactPath)]),
+  );
+}
+
+function validateRecordBinding(record, requestPath, request) {
+  const expected = {
+    batchId: request.batchId,
+    invocationId: request.invocationId,
+    repoId: request.repoId,
+    executionUnitId: request.executionUnitId,
+    phase: request.phase,
+    attempt: request.attempt,
+    requestDigest: fileDigest(requestPath),
+    resultDigest: fs.existsSync(request.resultPath) ? fileDigest(request.resultPath) : null,
+  };
+  for (const [field, value] of Object.entries(expected)) {
+    if (record[field] !== value) {
+      throw new BatchStateError(
+        `Attempt validation record ${field} does not match immutable attempt artifacts`,
+        "validation_record_mismatch",
+      );
+    }
+  }
+}
+
+function verifyValidationRecord({ batchRoot, requestPath, request, record }) {
+  validateRecordBinding(record, requestPath, request);
+  const validation = validateResultAgainstRequest(batchRoot, requestPath, request);
+  if (!isDeepStrictEqual(validationFromRecord(record), validation)) {
+    throw new BatchStateError(
+      "Attempt validation record no longer matches the request result and artifacts",
+      "validation_record_mismatch",
+    );
+  }
+  let currentDigests;
+  try {
+    currentDigests = artifactDigests(record.artifacts);
+  } catch (error) {
+    throw new BatchStateError(`Validated artifact is unavailable: ${error.message}`, "validated_artifact_changed");
+  }
+  if (!isDeepStrictEqual(record.artifactDigests, currentDigests)) {
+    throw new BatchStateError("Validated artifact content changed after commit", "validated_artifact_changed");
+  }
+  return validation;
+}
+
+function readOrCreateValidationRecord({ batchRoot, requestPath, request, now }) {
+  const recordPath = validationRecordPath(requestPath);
+  if (fs.existsSync(recordPath)) {
+    const record = validatedDocument(recordPath, validationSchema, validationSchemaPath, "attempt validation record");
+    verifyValidationRecord({ batchRoot, requestPath, request, record });
+    return { recordPath, record, validation: validationFromRecord(record), created: false };
+  }
+  const validation = validateResultAgainstRequest(batchRoot, requestPath, request);
+  const record = {
+    schemaVersion: 1,
+    batchId: request.batchId,
+    invocationId: request.invocationId,
+    repoId: request.repoId,
+    executionUnitId: request.executionUnitId,
+    phase: request.phase,
+    attempt: request.attempt,
+    requestDigest: fileDigest(requestPath),
+    resultDigest: fs.existsSync(request.resultPath) ? fileDigest(request.resultPath) : null,
+    status: validation.status,
+    valid: validation.valid,
+    errors: validation.errors,
+    artifacts: validation.artifacts,
+    artifactDigests: artifactDigests(validation.artifacts),
+    validatedAt: now,
+  };
+  const errors = validateSchema(record, validationSchema, validationSchemaPath);
+  if (errors.length > 0) {
+    throw new BatchStateError(`Attempt validation record violates its schema: ${errors.join("; ")}`, "schema_validation_failed");
+  }
+  assertSafePersistedValue(record);
+  createJsonExclusive(recordPath, record);
+  return { recordPath, record, validation, created: true };
+}
+
 function calculateProgress(executionUnits) {
   const eligible = executionUnits.filter(
     (unit) => !["not_applicable", "excluded", "blocked"].includes(unit.status),
@@ -433,46 +753,52 @@ export function commitAttempt({
   ownerToken,
   requestPath,
   now = new Date().toISOString(),
+  checkpoint,
 } = {}) {
   assertSchedulingAllowed(batchRoot, ownerToken);
   const request = validatedDocument(requestPath, requestSchema, requestSchemaPath, "attempt request");
   assertRequestResultBinding(requestPath, request);
-  const validation = validateAttemptResultFile(request.resultPath, {
-    batchRoot,
-    workspacePath: request.workspacePath,
-    expected: {
-      batchId: request.batchId,
-      invocationId: request.invocationId,
-      repoId: request.repoId,
-      executionUnitId: request.executionUnitId,
-      phase: request.phase,
-      attempt: request.attempt,
-    },
-  });
+  assertRequestMatchesBatch(batchRoot, requestPath, request);
+  const validationRecord = readOrCreateValidationRecord({ batchRoot, requestPath, request, now });
+  const { validation } = validationRecord;
+  checkpoint?.("validation");
   const committedStatus = stateStatus(validation.status);
-  const state = updateState({
-    batchRoot,
-    ownerToken,
-    now,
-    mutate: (draft) => {
-      const unit = draft.executionUnits.find(
-        (candidate) => candidate.executionUnitId === request.executionUnitId
-          && candidate.phase === request.phase,
-      );
-      if (!unit
-          || unit.status !== "running"
-          || unit.attempt !== request.attempt
-          || unit.invocationId !== request.invocationId
-          || unit.resultPath !== request.resultPath) {
-        throw new BatchStateError("Running state does not match the attempt request", "attempt_compare_failed");
-      }
-      unit.status = committedStatus;
-      unit.finishedAt = now;
-      draft.progress = calculateProgress(draft.executionUnits);
-      draft.status = aggregateBatchStatus(draft.executionUnits, draft.progress);
-      return draft;
-    },
-  });
+  const current = readState(batchRoot);
+  const currentUnit = current.executionUnits.find(
+    (candidate) => candidate.executionUnitId === request.executionUnitId
+      && candidate.phase === request.phase,
+  );
+  const identityMatches = currentUnit
+    && currentUnit.attempt === request.attempt
+    && currentUnit.invocationId === request.invocationId
+    && currentUnit.resultPath === request.resultPath;
+  let state;
+  if (identityMatches && currentUnit.status === committedStatus) {
+    state = current;
+  } else if (identityMatches && currentUnit.status === "running") {
+    state = updateState({
+      batchRoot,
+      ownerToken,
+      now,
+      mutate: (draft) => {
+        const unit = draft.executionUnits.find(
+          (candidate) => candidate.executionUnitId === request.executionUnitId
+            && candidate.phase === request.phase,
+        );
+        if (!unit || unit.status !== "running") {
+          throw new BatchStateError("Running state does not match the attempt request", "attempt_compare_failed");
+        }
+        unit.status = committedStatus;
+        unit.finishedAt = now;
+        draft.progress = calculateProgress(draft.executionUnits);
+        draft.status = aggregateBatchStatus(draft.executionUnits, draft.progress);
+        return draft;
+      },
+    });
+  } else {
+    throw new BatchStateError("Attempt state does not match the validation record", "attempt_compare_failed");
+  }
+  checkpoint?.("state");
   const repoUnits = state.executionUnits.filter((unit) => unit.repoId === request.repoId);
   const repoStatePath = path.join(path.resolve(batchRoot), "repos", `${request.repoId}.json`);
   const previousRepoState = fs.existsSync(repoStatePath)
@@ -510,10 +836,12 @@ export function commitAttempt({
       },
     },
   });
+  checkpoint?.("repo");
   appendEvent({
     batchRoot,
     ownerToken,
     now,
+    operationKey: attemptOperationKey("commit", request),
     event: {
       type: validation.status === "needs_input" ? "input_requested" : "attempt_finished",
       repoId: request.repoId,
@@ -522,49 +850,129 @@ export function commitAttempt({
       payload: { phase: request.phase, attempt: request.attempt, status: validation.status },
     },
   });
-  return { validation, state };
+  checkpoint?.("event");
+  return { validation, validationRecordPath: validationRecord.recordPath, state };
 }
 
 export function finalizeAssessmentBatch({
   batchRoot,
   ownerToken,
   now = new Date().toISOString(),
+  checkpoint,
 } = {}) {
+  const root = path.resolve(batchRoot);
+  const journalPath = finalizationRecordPath(root);
+  const state = readState(root);
+  const summaryPaths = {
+    json: path.join(root, "summary.json"),
+    markdown: path.join(root, "summary.md"),
+  };
+  const expectedReportPaths = assessmentReportPaths({ batchRoot: root, completedAt: state.updatedAt });
+  const paths = { ...summaryPaths, ...expectedReportPaths };
+  const existingJournal = fs.existsSync(journalPath)
+    ? validatedDocument(journalPath, finalizationSchema, finalizationSchemaPath, "Assessment finalization journal")
+    : null;
+  if (existingJournal?.releaseReady && !readLease(root)) {
+    if (fileDigest(summaryPaths.json) !== existingJournal.summaryJsonDigest
+        || fileDigest(summaryPaths.markdown) !== existingJournal.summaryMarkdownDigest
+        || existingJournal.reportDirectoryPath !== expectedReportPaths.reportDirectory
+        || existingJournal.reportIndexPath !== expectedReportPaths.reportIndex
+        || existingJournal.aggregateReportPath !== expectedReportPaths.aggregateReport
+        || directoryDigest(expectedReportPaths.reportDirectory) !== existingJournal.reportDirectoryDigest
+        || fileDigest(expectedReportPaths.reportIndex) !== existingJournal.reportIndexDigest
+        || fileDigest(expectedReportPaths.aggregateReport) !== existingJournal.aggregateReportDigest) {
+      throw new BatchStateError("Finalized deliverables do not match their journal", "finalization_record_mismatch");
+    }
+    const releasedJournal = existingJournal.released
+      ? existingJournal
+      : { ...existingJournal, released: true };
+    if (!existingJournal.released) atomicWriteJson(journalPath, releasedJournal);
+    return { summary: jsonDocument(summaryPaths.json, "batch summary"), paths };
+  }
   assertSchedulingAllowed(batchRoot, ownerToken);
-  const state = readState(batchRoot);
   if (["draft", "ready", "running", "awaiting_input"].includes(state.status)
       || state.executionUnits.some((unit) => ["pending", "preparing", "running", "needs_input"].includes(unit.status))) {
     throw new BatchStateError("Batch still has non-terminal assessment work", "batch_not_terminal");
   }
-  const validations = new Map();
+  const repoValidations = new Map();
   for (const repoId of new Set(state.executionUnits.map((unit) => unit.repoId))) {
     const repoPath = path.join(path.resolve(batchRoot), "repos", `${repoId}.json`);
-    if (!fs.existsSync(repoPath)) continue;
+    if (!fs.existsSync(repoPath)) {
+      throw new BatchStateError(`Repository validation state is missing: ${repoId}`, "validation_commit_incomplete");
+    }
     const repoState = jsonDocument(repoPath, "repository state");
     for (const [executionUnitId, validation] of Object.entries(repoState.validations ?? {})) {
-      validations.set(executionUnitId, validation);
+      repoValidations.set(executionUnitId, validation);
     }
   }
-  const results = state.executionUnits.map((unit) => ({
-    repoId: unit.repoId,
-    executionUnitId: unit.executionUnitId,
-    status: unit.status,
-    attempt: unit.attempt,
-    artifacts: validations.get(unit.executionUnitId)?.artifacts ?? {},
-    errors: validations.get(unit.executionUnitId)?.errors ?? [],
-  }));
+  const manifest = jsonDocument(path.join(root, "manifest.json"), "batch manifest");
+  const results = state.executionUnits.map((unit) => {
+    if (!unit.resultPath || unit.attempt < 1 || !unit.invocationId) {
+      throw new BatchStateError(`Terminal execution unit has no attempt identity: ${unit.executionUnitId}`, "validation_commit_incomplete");
+    }
+    const requestPath = path.join(path.dirname(unit.resultPath), "request.json");
+    const request = validatedDocument(requestPath, requestSchema, requestSchemaPath, "attempt request");
+    assertRequestMatchesBatch(batchRoot, requestPath, request);
+    const recordPath = validationRecordPath(requestPath);
+    if (!fs.existsSync(recordPath)) {
+      throw new BatchStateError(`Attempt validation record is missing: ${unit.executionUnitId}`, "validation_commit_incomplete");
+    }
+    const record = validatedDocument(recordPath, validationSchema, validationSchemaPath, "attempt validation record");
+    verifyValidationRecord({ batchRoot, requestPath, request, record });
+    if (record.executionUnitId !== unit.executionUnitId
+        || record.invocationId !== unit.invocationId
+        || stateStatus(record.status) !== unit.status) {
+      throw new BatchStateError(`Attempt validation record does not match terminal state: ${unit.executionUnitId}`, "validation_record_mismatch");
+    }
+    const validation = validationFromRecord(record);
+    if (!isDeepStrictEqual(repoValidations.get(unit.executionUnitId), validation)) {
+      throw new BatchStateError(`Repository validation is not committed: ${unit.executionUnitId}`, "validation_commit_incomplete");
+    }
+    return {
+      repoId: unit.repoId,
+      executionUnitId: unit.executionUnitId,
+      status: unit.status,
+      attempt: unit.attempt,
+      language: request.language,
+      workspacePath: request.workspacePath,
+      artifacts: record.artifacts,
+      artifactDigests: record.artifactDigests,
+      errors: record.errors,
+    };
+  });
+  const publishedReport = publishBatchAssessmentReport({
+    batchRoot: root,
+    manifest,
+    state,
+    results,
+  });
+  checkpoint?.("report");
+  const aggregateSummary = publishedReport.aggregate.extensions["github-copilot-modernization"];
   const summary = {
     schemaVersion: 1,
     batchId: state.batchId,
     phase: "assessment",
     status: state.status,
-    completedAt: now,
+    completedAt: state.updatedAt,
     counts: {
       total: results.length,
       completed: results.filter((result) => result.status === "completed").length,
       completedWithIssues: results.filter((result) => result.status === "completed_with_issues").length,
       failed: results.filter((result) => ["protocol_error", "failed", "interrupted"].includes(result.status)).length,
     },
+    reports: {
+      directory: publishedReport.paths.reportDirectory,
+      index: publishedReport.paths.reportIndex,
+      aggregate: publishedReport.paths.aggregateReport,
+      digest: publishedReport.reportDirectoryDigest,
+    },
+    findings: {
+      total: aggregateSummary.counts.trackedFindings,
+      bySeverity: aggregateSummary.counts.bySeverity,
+      byState: aggregateSummary.counts.byState,
+    },
+    topRecommendations: aggregateSummary.topRecommendations,
+    planningSupported: aggregateSummary.planningSupported,
     results,
   };
   const markdown = [
@@ -577,6 +985,33 @@ export function finalizeAssessmentBatch({
     `- Completed with issues: ${summary.counts.completedWithIssues}`,
     `- Failed: ${summary.counts.failed}`,
     "",
+    "## Findings",
+    "",
+    `- Tracked: ${summary.findings.total}`,
+    `- Critical: ${summary.findings.bySeverity.critical}`,
+    `- High: ${summary.findings.bySeverity.high}`,
+    `- Medium: ${summary.findings.bySeverity.medium}`,
+    `- Low: ${summary.findings.bySeverity.low}`,
+    `- Info: ${summary.findings.bySeverity.info}`,
+    ...Object.entries(summary.findings.byState).map(([stateName, count]) => `- ${stateName}: ${count}`),
+    "",
+    "## Top Recommendations",
+    "",
+    ...(summary.topRecommendations.length > 0
+      ? summary.topRecommendations.map((recommendation) => `- ${recommendation.identity}: ${recommendation.summary}`)
+      : ["- None"]),
+    "",
+    "## Planning Support",
+    "",
+    `- Supported: ${summary.planningSupported.supported}`,
+    `- Not supported: ${summary.planningSupported.unsupported}`,
+    `- Unavailable: ${summary.planningSupported.unavailable}`,
+    "",
+    "## Report",
+    "",
+    `- Dashboard: ${summary.reports.index}`,
+    `- Aggregate data: ${summary.reports.aggregate}`,
+    "",
     "## Results",
     "",
     ...results.map((result) => {
@@ -586,14 +1021,49 @@ export function finalizeAssessmentBatch({
     }),
     "",
   ].join("\n");
-  const paths = writeSummary({ batchRoot, ownerToken, summary, markdown });
+  writeSummary({ batchRoot, ownerToken, summary, markdown });
+  checkpoint?.("summary");
   appendEvent({
     batchRoot,
     ownerToken,
     now,
+    operationKey: `finalize:${state.batchId}:assessment`,
     event: { type: "batch_completed", payload: { status: state.status, counts: summary.counts } },
   });
+  checkpoint?.("event");
+  const journal = {
+    schemaVersion: 1,
+    batchId: state.batchId,
+    phase: "assessment",
+    status: state.status,
+    summaryJsonDigest: fileDigest(paths.json),
+    summaryMarkdownDigest: fileDigest(paths.markdown),
+    reportDirectoryPath: publishedReport.paths.reportDirectory,
+    reportIndexPath: publishedReport.paths.reportIndex,
+    aggregateReportPath: publishedReport.paths.aggregateReport,
+    reportDirectoryDigest: publishedReport.reportDirectoryDigest,
+    reportIndexDigest: publishedReport.reportIndexDigest,
+    aggregateReportDigest: publishedReport.aggregateReportDigest,
+    completedAt: summary.completedAt,
+    releaseReady: true,
+    released: false,
+  };
+  const journalErrors = validateSchema(journal, finalizationSchema, finalizationSchemaPath);
+  if (journalErrors.length > 0) {
+    throw new BatchStateError(`Assessment finalization journal violates its schema: ${journalErrors.join("; ")}`, "schema_validation_failed");
+  }
+  if (existingJournal && !isDeepStrictEqual(existingJournal, journal)) {
+    const comparableExisting = { ...existingJournal, released: false };
+    if (!isDeepStrictEqual(comparableExisting, journal)) {
+      throw new BatchStateError("Assessment finalization journal conflicts with the summary", "finalization_record_mismatch");
+    }
+  }
+  atomicWriteJson(journalPath, journal);
+  checkpoint?.("release-ready");
   releaseLease({ batchRoot, ownerToken });
+  checkpoint?.("released");
+  atomicWriteJson(journalPath, { ...journal, released: true });
+  checkpoint?.("complete");
   return { summary, paths };
 }
 
@@ -630,6 +1100,7 @@ async function runLeaseSessionWorker({ batchRoot, invocationId, leaseSessionId, 
   let ownerToken;
   let server;
   let idleTimer;
+  let readySent = false;
   const closeServer = () => {
     clearTimeout(idleTimer);
     server?.close();
@@ -688,9 +1159,11 @@ async function runLeaseSessionWorker({ batchRoot, invocationId, leaseSessionId, 
       leaseSessionId,
       started: compactStartedAttempt(started),
     });
+    readySent = true;
     await new Promise((resolve) => server.once("close", resolve));
   } catch (error) {
-    if (ownerToken && !server?.listening) {
+    if (server?.listening) server.close();
+    if (ownerToken && !readySent) {
       try {
         releaseLease({ batchRoot, ownerToken });
       } catch {}

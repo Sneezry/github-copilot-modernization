@@ -521,6 +521,25 @@ export function buildNcuArgs(packageJsonPath) {
   ];
 }
 
+export function resolveNpxInvocation({
+  platform = process.platform,
+  execPath = process.execPath,
+  env = process.env,
+  existsSync = fs.existsSync,
+} = {}) {
+  if (platform !== "win32") return { command: "npx", prefixArgs: [] };
+  const candidates = [
+    env.npm_execpath ? path.join(path.dirname(env.npm_execpath), "npx-cli.js") : null,
+    path.join(path.dirname(execPath), "node_modules", "npm", "bin", "npx-cli.js"),
+    env.APPDATA ? path.join(env.APPDATA, "npm", "node_modules", "npm", "bin", "npx-cli.js") : null,
+  ].filter(Boolean);
+  const npxCliPath = candidates.find((candidate) => existsSync(candidate));
+  if (!npxCliPath) {
+    throw new Error("Unable to locate npx-cli.js for the current Windows Node.js installation");
+  }
+  return { command: execPath, prefixArgs: [npxCliPath] };
+}
+
 export function runNcu({
   packageJsonPath,
   outputDir,
@@ -534,8 +553,8 @@ export function runNcu({
     throw new Error(`package.json was not found: ${packageJsonPath}`);
   }
   fs.mkdirSync(outputDir, { recursive: true });
-  const command = process.platform === "win32" ? "npx.cmd" : "npx";
-  const args = buildNcuArgs(packageJsonPath);
+  const { command, prefixArgs } = resolveNpxInvocation();
+  const args = [...prefixArgs, ...buildNcuArgs(packageJsonPath)];
   const commandResult = runCommand(command, args, {
     cwd: path.dirname(packageJsonPath),
     allowedStatuses: [0, 1],

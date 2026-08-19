@@ -155,11 +155,35 @@ test("batch preparation isolates task outputs and bounds concurrency", (t) => {
     analysisCoverage: "full",
     attemptScratchRoot,
     maxConcurrency: 1,
+    assessmentConfig: {
+      targetRuntime: "java-21",
+      targetComputeServices: ["azure-container-apps"],
+      enableContainerization: true,
+      targetOS: ["linux"],
+      minimumCveSeverity: "high",
+      cveScanScope: "all",
+    },
   });
 
   assert.equal(prepared.attemptScratchRoot, path.resolve(attemptScratchRoot));
   assert.equal(fs.statSync(attemptScratchRoot).isDirectory(), true);
   assert.equal(prepared.maxConcurrentSubagents, 1);
+  assert.deepEqual(prepared.assessmentConfig, {
+    targetRuntime: "java-21",
+    targetComputeServices: ["azure-container-apps"],
+    enableContainerization: true,
+    targetOS: ["linux"],
+    minimumCveSeverity: "high",
+    cveScanScope: "all",
+  });
+  const intent = fs.readFileSync(path.join(prepared.runDir, "intent.yaml"), "utf8");
+  assert.match(intent, /assessment_config:/);
+  assert.match(intent, /targetRuntime: "java-21"/);
+  assert.match(intent, /targetComputeServices:\n    - "azure-container-apps"/);
+  assert.match(intent, /enableContainerization: true/);
+  assert.match(intent, /targetOS:\n    - "linux"/);
+  assert.match(intent, /minimumCveSeverity: "high"/);
+  assert.match(intent, /cveScanScope: "all"/);
   assert.deepEqual(prepared.batches.map((batch) => batch.maxConcurrency), [1, 1]);
   assert.equal(fs.readFileSync(canonicalFact, "utf8"), "single-mode-output");
   for (const taskEntry of prepared.batches.flatMap((batch) => batch.tasks)) {

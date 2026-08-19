@@ -73,6 +73,17 @@ test("initialization creates immutable manifest and rejects secret-bearing persi
   );
   assert.equal(fs.existsSync(path.join(unsafeRoot, "manifest.json")), false);
 
+  const unsafeHttpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "batch-unsafe-http-"));
+  t.after(() => fs.rmSync(unsafeHttpRoot, { recursive: true, force: true }));
+  assert.throws(
+    () => initializeBatch({
+      batchRoot: unsafeHttpRoot,
+      manifest: { batchId: "unsafe-http", url: "http://user:secret@example.com/repo.git?token=x" },
+    }),
+    /must not contain URL credentials/,
+  );
+  assert.equal(fs.existsSync(path.join(unsafeHttpRoot, "manifest.json")), false);
+
   const keyRoot = fs.mkdtempSync(path.join(os.tmpdir(), "batch-secret-key-"));
   t.after(() => fs.rmSync(keyRoot, { recursive: true, force: true }));
   assert.throws(
@@ -167,6 +178,45 @@ test("owner updates state, event log, repository state, and summary atomically",
   assert.equal(JSON.parse(fs.readFileSync(summaryPaths.json)).status, "ready");
   assert.equal(fs.readFileSync(summaryPaths.markdown, "utf8"), "# Batch summary\n");
   assert.equal(fs.readdirSync(root).some((name) => name.endsWith(".tmp")), false);
+});
+
+test("event operation keys make retries idempotent and reject conflicting reuse", (t) => {
+  const root = createBatch(t);
+  const { ownerToken } = acquireLease({ batchRoot: root, invocationId: "owner" });
+  const event = {
+    type: "attempt_finished",
+    repoId: "orders",
+    executionUnitId: "orders",
+    invocationId: "11111111-1111-4111-8111-111111111111",
+    payload: { phase: "assessment", attempt: 1, status: "completed" },
+  };
+  const first = appendEvent({
+    batchRoot: root,
+    ownerToken,
+    event,
+    operationKey: "commit:orders:assessment:1",
+  });
+  const replay = appendEvent({
+    batchRoot: root,
+    ownerToken,
+    event: {
+      ...event,
+      payload: { status: "completed", attempt: 1, phase: "assessment" },
+    },
+    operationKey: "commit:orders:assessment:1",
+    now: "2026-08-18T12:00:00.000Z",
+  });
+  assert.deepEqual(replay, first);
+  assert.equal(fs.readFileSync(path.join(root, "events.jsonl"), "utf8").trim().split(/\r?\n/).length, 1);
+  assert.throws(
+    () => appendEvent({
+      batchRoot: root,
+      ownerToken,
+      event: { ...event, payload: { ...event.payload, status: "failed" } },
+      operationKey: "commit:orders:assessment:1",
+    }),
+    (error) => error.code === "event_operation_conflict",
+  );
 });
 
 test("takeover uses compare-and-swap and remains read-only", (t) => {

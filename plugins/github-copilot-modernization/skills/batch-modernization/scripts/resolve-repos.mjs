@@ -33,7 +33,7 @@ function unknownFields(value, knownKeys) {
 }
 
 function sanitizeUnknownString(value) {
-  return value.replace(/(?:https|ssh):\/\/[^\s'"<>]+/gi, (candidate) => {
+  return value.replace(/(?:https?|ssh):\/\/[^\s'"<>]+/gi, (candidate) => {
     try {
       const parsed = new URL(candidate);
       parsed.username = "";

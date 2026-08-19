@@ -4,6 +4,7 @@ description: |
   Architect analysis for rewrite/migration: produces structured architecture artifacts plus global prose research views (project-structure, tech-stack, data-model) for planning, implementation, feature-inventory, and gates. This is the single architect task.
   Triggers: "analyze architecture", "analyze existing application", "analyze the codebase", "codebase architecture analysis", "analyze for migration", "prepare migration analysis", "produce migration artifacts", "analyze before rewrite".
   NOT for: greenfield projects, pure syntax/version migrations (Python2→3, Java 8→17 — no paradigm shift), runtime validation (use runtime-validation), infrastructure/deployment analysis (use analyzing-operations), feature inventory/spec writing (use feature-inventory).
+user-invocable: false
 ---
 
 # Analyzing Architecture
